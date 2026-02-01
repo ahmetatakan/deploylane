@@ -1,0 +1,33 @@
+# ---- Python / venv ----
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pytype/
+pip-wheel-metadata/
+*.egg-info/
+dist/
+build/
+
+# ---- OS / Editor ----
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- Project-specific (DO NOT COMMIT SECRETS) ----
+.deploylane/
+*.vars.yml
+vars.yml
+
+# Optional: local logs
+*.log
