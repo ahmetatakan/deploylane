@@ -1,0 +1,10 @@
+prune .deploylane
+global-exclude *.vars.yml
+
+# Exclude dev artifacts
+prune .venv
+prune dist
+prune build
+
+# Ignore caches
+global-exclude __pycache__ *.pyc
