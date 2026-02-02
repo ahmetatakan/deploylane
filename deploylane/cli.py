@@ -1,7 +1,9 @@
 from __future__ import annotations
 from typing import Dict, Optional, Tuple, Any, List
 import typer
+import sys
 from typing import Optional
+from typer.main import get_command
 from pathlib import Path
 from .auth import (
     login as do_login,
@@ -27,7 +29,9 @@ from .config import (
     env_fallback_host,
     env_fallback_token,
     normalize_host,
-    get_profile
+    get_profile,
+    set_active_profile_name,
+    save_config
 )
 from .ymlvars import (
     write_vars_file, 
@@ -43,6 +47,33 @@ from .ymlvars import (
 
 app = typer.Typer(add_completion=True, no_args_is_help=True)
 
+
+SKIP_PROFILE_BANNER = {
+    "profile-use",
+    "profiles-list",
+    "login", 
+    "logout",
+}
+
+@app.callback(invoke_without_command=False)
+def _global_callback(ctx: typer.Context) -> None:
+    # Don't print during help/completion parsing
+    if getattr(ctx, "resilient_parsing", False):
+        return
+
+    # IMPORTANT: actual command name
+    sub = (ctx.invoked_subcommand or "").strip()
+
+    if sub in SKIP_PROFILE_BANNER:
+        return
+
+    cfg = load_config()
+    active = get_active_profile_name(cfg)
+    prof = get_profile(cfg, active)
+
+    typer.secho(f"▶ profile: {active}", fg=typer.colors.GREEN, bold=True)
+    if prof is None:
+        typer.secho("  (not logged in for this profile)", fg=typer.colors.YELLOW)
 
 def get_active_profile_or_exit() -> Profile:
     cfg = load_config()
@@ -467,6 +498,45 @@ def vars_diff(
 
     if exit_code:
         raise typer.Exit(code=2)
+
+@app.command("profiles-list")
+def profiles_list() -> None:
+    """List stored profiles and show the active one."""
+    cfg = load_config()
+    active = get_active_profile_name(cfg)
+
+    profiles = cfg.get("profiles", {})
+    if not isinstance(profiles, dict) or not profiles:
+        typer.echo("No profiles found. Run: dlane login")
+        raise typer.Exit(code=1)
+
+    # Deterministic ordering
+    for name in sorted(profiles.keys()):
+        mark = "*" if name == active else " "
+        p = profiles.get(name, {})
+        host = p.get("host", "")
+        typer.echo(f"{mark} {name}\t{host}")
+
+    typer.echo("")
+    typer.echo(f"Active profile: {active}")
+
+@app.command("profile-use")
+def profile_use(
+    profile: str = typer.Option(..., "--profile", help="Profile name to activate"),
+) -> None:
+    """Set active profile (does not modify credentials)."""
+    cfg = load_config()
+
+    profiles = cfg.get("profiles", {})
+    if not isinstance(profiles, dict) or profile not in profiles:
+        _err(f"Profile not found: {profile}. Use: dlane profiles-list")
+
+    set_active_profile_name(cfg, profile)
+    save_config(cfg)
+
+    typer.secho("OK", fg=typer.colors.GREEN)
+    typer.echo(f"Active profile set to: {profile}")
+    typer.echo(f"Config: {config_path()}")
 
 if __name__ == "__main__":
     app()
