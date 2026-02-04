@@ -205,12 +205,18 @@ def set_project_variable(
 ) -> None:
     """
     Create or update a GitLab project variable.
-    GitLab API: POST /projects/:id/variables (create) or PUT /projects/:id/variables/:key (update)
+    GitLab API:
+      - POST /projects/:id/variables (create)
+      - PUT  /projects/:id/variables/:key (update)
+    Notes:
+      - If multiple variables exist with the same key, GitLab requires
+        filter[environment_scope] on update to disambiguate.
     """
     base_url = f"{host}/api/v4/projects/{project_id}/variables"
     headers = _headers(token)
 
-    payload: Dict[str, Any] = {
+    # Create payload includes "key"
+    payload_create: Dict[str, Any] = {
         "key": key,
         "value": value,
         "protected": protected,
@@ -219,19 +225,28 @@ def set_project_variable(
         "variable_type": variable_type,
     }
 
-    # 1) Try create
-    try:
-        r = requests.post(base_url, headers=headers, data=payload, timeout=timeout_s)
-    except requests.RequestException as e:
-        raise GitLabError(f"GitLab unreachable: {e}") from e
+    # Update payload does NOT need "key" (endpoint already includes it)
+    payload_update: Dict[str, Any] = {
+        "value": value,
+        "protected": protected,
+        "masked": masked,
+        "environment_scope": environment_scope,
+        "variable_type": variable_type,
+    }
 
-    if r.status_code in (200, 201):  # created
-        return
+    def _do_update() -> None:
+        """Update with env_scope filter to avoid 409 ambiguity."""
+        put_url = f"{base_url}/{key}"
+        params = {"filter[environment_scope]": environment_scope}
 
-    # 2) If already exists -> update
-    if r.status_code == 400 and "has already been taken" in (r.text or ""):
         try:
-            r2 = requests.put(f"{base_url}/{key}", headers=headers, data=payload, timeout=timeout_s)
+            r2 = requests.put(
+                put_url,
+                headers=headers,
+                params=params,
+                data=payload_update,
+                timeout=timeout_s,
+            )
         except requests.RequestException as e:
             raise GitLabError(f"GitLab unreachable: {e}") from e
 
@@ -239,10 +254,30 @@ def set_project_variable(
             return
         if r2.status_code in (401, 403):
             raise GitLabError("Not authorized (token invalid or missing scope).")
+        if r2.status_code == 409:
+            raise GitLabError(
+                f"GitLab API error (update): 409 {r2.text[:300]}\n"
+                f"Hint: Multiple '{key}' variables exist. Check environment_scope in YAML."
+            )
         raise GitLabError(f"GitLab API error (update): {r2.status_code} {r2.text[:300]}")
+
+    # 1) Try create
+    try:
+        r = requests.post(base_url, headers=headers, data=payload_create, timeout=timeout_s)
+    except requests.RequestException as e:
+        raise GitLabError(f"GitLab unreachable: {e}") from e
+
+    if r.status_code in (200, 201):  # created
+        return
 
     if r.status_code in (401, 403):
         raise GitLabError("Not authorized (token invalid or missing scope).")
+
+    # 2) If already exists OR ambiguous -> update (with env_scope filter)
+    # GitLab may return 400 "taken" or 409 "multiple variables..."
+    if (r.status_code == 400 and "has already been taken" in (r.text or "")) or r.status_code == 409:
+        _do_update()
+        return
 
     raise GitLabError(f"GitLab API error (create): {r.status_code} {r.text[:300]}")
 
@@ -256,25 +291,25 @@ def delete_project_variable(
     timeout_s: int = 20,
 ) -> None:
     """
-    Delete a GitLab project variable.
-    GitLab API: DELETE /projects/:id/variables/:key?filter[environment_scope]=*
-    (GitLab supports filtering by environment scope; some instances accept environment_scope directly.)
+    Delete a GitLab project variable by key + environment_scope.
+    GitLab API: DELETE /projects/:id/variables/:key?filter[environment_scope]=...
     """
-    url = f"{host}/api/v4/projects/{project_id}/variables/{key}"
+    base_url = f"{host}/api/v4/projects/{project_id}/variables/{key}"
     headers = _headers(token)
 
     params = {"filter[environment_scope]": environment_scope}
 
     try:
-        r = requests.delete(url, headers=headers, params=params, timeout=timeout_s)
+        r = requests.delete(base_url, headers=headers, params=params, timeout=timeout_s)
     except requests.RequestException as e:
         raise GitLabError(f"GitLab unreachable: {e}") from e
 
-    if r.status_code in (200, 204):
+    if r.status_code in (200, 204):  # deleted
         return
-    if r.status_code == 404:
-        raise GitLabError("Variable not found.")
     if r.status_code in (401, 403):
         raise GitLabError("Not authorized (token invalid or missing scope).")
+    if r.status_code == 404:
+        # Already gone or doesn't exist for that scope: treat as idempotent
+        return
 
-    raise GitLabError(f"GitLab API error: {r.status_code} {r.text[:300]}")
+    raise GitLabError(f"GitLab API error (delete): {r.status_code} {r.text[:300]}")

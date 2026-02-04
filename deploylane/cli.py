@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict, Optional, Tuple, Any, List
+from typing import Dict, Optional, Tuple, Any, List, Set
 import typer
 import sys
 from typing import Optional
@@ -18,7 +18,8 @@ from .gitlab import (
     list_projects, 
     get_project_by_path, 
     list_project_variables, 
-    set_project_variable
+    set_project_variable,
+    delete_project_variable
 )
 from .config import (
     Profile,
@@ -58,6 +59,16 @@ app.add_typer(vars_app, name="vars")
 
 profile_app = typer.Typer(no_args_is_help=True, help="Manage local profiles.")
 app.add_typer(profile_app, name="profile")
+
+def _desired_pairs_from_yml(scope_default: str, variables: Dict[str, Any]) -> Set[Tuple[str, str]]:
+    out: Set[Tuple[str, str]] = set()
+    for key, meta in variables.items():
+        if not isinstance(key, str) or not isinstance(meta, dict):
+            continue
+        env_scope = meta.get("environment_scope", scope_default)
+        env_scope = str(env_scope or "*").strip() or "*"
+        out.add((key.strip(), env_scope))
+    return out
 
 @app.callback(invoke_without_command=False)
 def _global_callback(ctx: typer.Context) -> None:
@@ -285,6 +296,85 @@ def vars_get(
     typer.secho("OK", fg=typer.colors.GREEN)
     typer.echo(f"Saved → {out}")
 
+@vars_app.command("plan")
+def vars_plan(
+    ctx: typer.Context,
+    file: Path = typer.Option(DEFAULT_FILE, "--file", help="YAML file to plan against GitLab"),
+):
+    """
+    Show a deterministic plan: what would be created/updated, and what exists in GitLab but not in YAML (prune candidates).
+    Does NOT apply or delete anything.
+    """
+    prof = get_active_profile_or_exit()
+
+    if not file.exists():
+        _err(f"YAML file not found: {file}")
+
+    data = read_vars_file(file)
+
+    project = data.get("project")
+    scope = data.get("scope", "*")
+    variables = data.get("variables", {})
+
+    if not project or not isinstance(variables, dict):
+        _err("Invalid YAML structure (missing project/variables).")
+
+    try:
+        prj = get_project_by_path(prof.host, prof.token, project)
+        current_vars = list_project_variables(prof.host, prof.token, prj.id)
+    except GitLabError as e:
+        _err(str(e))
+
+    desired = _desired_pairs_from_yml(scope, variables)
+
+    # Build current set for quick membership
+    current_pairs = set()
+    current_map = {}
+    for v in current_vars:
+        k = str(getattr(v, "key", "")).strip()
+        e = str(getattr(v, "environment_scope", "*") or "*").strip() or "*"
+        if not k:
+            continue
+        current_pairs.add((k, e))
+        current_map[(k, e)] = v
+
+    # Classify
+    creates = sorted(desired - current_pairs)
+    prunes = sorted(current_pairs - desired)
+
+    # Update candidates (exists in both; we can't know if value differs unless we compare values)
+    updates = []
+    for (k, e) in sorted(desired & current_pairs):
+        meta = variables.get(k, {})
+        if isinstance(meta, dict):
+            # Compare only what we can read back: value is readable unless masked.
+            desired_val = str(meta.get("value", ""))
+            cur = current_map.get((k, e))
+            cur_val = str(getattr(cur, "value", "") or "")
+            masked = bool(getattr(cur, "masked", False))
+            # If masked in GitLab, value may not be comparable; treat as "maybe update" only if YAML differs and not masked.
+            if not masked and desired_val != cur_val:
+                updates.append((k, e))
+
+    typer.secho("VARS PLAN", fg=typer.colors.CYAN, bold=True)
+    typer.echo(f"Project : {project}")
+    typer.echo(f"File    : {file}")
+    typer.echo("")
+
+    def _print_block(title: str, items: list[tuple[str, str]], color: str) -> None:
+        typer.secho(f"{title} ({len(items)})", fg=getattr(typer.colors, color), bold=True)
+        if not items:
+            typer.echo("  -")
+            return
+        for k, e in items:
+            typer.echo(f"  - {k}\tenv={e}")
+
+    _print_block("Create", creates, "GREEN")
+    typer.echo("")
+    _print_block("Update (value differs)", updates, "YELLOW")
+    typer.echo("")
+    _print_block("Prune candidates (exists in GitLab, not in YAML)", prunes, "RED")
+
 @vars_app.command("apply")
 def vars_set(
     ctx: typer.Context,
@@ -337,7 +427,96 @@ def vars_set(
 
     typer.secho("DONE", fg=typer.colors.GREEN)
     
+@vars_app.command("prune")
+def vars_prune(
+    ctx: typer.Context,
+    file: Path = typer.Option(DEFAULT_FILE, "--file", help="YAML file to use as source of truth"),
+    yes: bool = typer.Option(False, "--yes", help="Actually delete (otherwise only prints the plan)"),
+    env_scope: Optional[str] = typer.Option(
+        None,
+        "--env-scope",
+        help="Only prune variables for this environment_scope (example: '*', 'production')",
+    ),
+):
+    """
+    Delete GitLab variables that exist in GitLab but are NOT present in YAML.
+    By default this is a dry-run unless --yes is provided.
+    """
+    prof = get_active_profile_or_exit()
 
+    if not file.exists():
+        _err(f"YAML file not found: {file}")
+
+    data = read_vars_file(file)
+
+    project = data.get("project")
+    scope = data.get("scope", "*")
+    variables = data.get("variables", {})
+
+    if not project or not isinstance(variables, dict):
+        _err("Invalid YAML structure (missing project/variables).")
+
+    try:
+        prj = get_project_by_path(prof.host, prof.token, project)
+        current_vars = list_project_variables(prof.host, prof.token, prj.id)
+    except GitLabError as e:
+        _err(str(e))
+
+    desired = _desired_pairs_from_yml(scope, variables)
+
+    # Current pairs
+    current_pairs = set()
+    for v in current_vars:
+        k = str(getattr(v, "key", "")).strip()
+        e = str(getattr(v, "environment_scope", "*") or "*").strip() or "*"
+        if not k:
+            continue
+        current_pairs.add((k, e))
+
+    prunes = sorted(current_pairs - desired)
+
+    # Optional filter: only one environment scope
+    if env_scope is not None:
+        env_scope = str(env_scope).strip() or "*"
+        prunes = [pe for pe in prunes if pe[1] == env_scope]
+
+    typer.secho("VARS PRUNE", fg=typer.colors.RED, bold=True)
+    typer.echo(f"Project : {project}")
+    typer.echo(f"File    : {file}")
+    if env_scope is not None:
+        typer.echo(f"Filter  : env_scope={env_scope}")
+    typer.echo("")
+
+    if not prunes:
+        typer.secho("Nothing to prune.", fg=typer.colors.GREEN)
+        return
+
+    typer.secho(f"Prune candidates ({len(prunes)})", fg=typer.colors.YELLOW, bold=True)
+    for k, e in prunes:
+        typer.echo(f"  - {k}\tenv={e}")
+
+    if not yes:
+        typer.echo("")
+        typer.secho("Dry-run only. Re-run with --yes to delete.", fg=typer.colors.CYAN)
+        return
+
+    typer.echo("")
+    typer.secho("Deleting...", fg=typer.colors.RED, bold=True)
+
+    for k, e in prunes:
+        try:
+            delete_project_variable(
+                host=prof.host,
+                token=prof.token,
+                project_id=prj.id,
+                key=k,
+                environment_scope=e,
+            )
+            typer.echo(f"  OK  {k} (env={e})")
+        except GitLabError as ex:
+            typer.echo(f"  FAIL {k} (env={e}): {ex}")
+
+    typer.secho("DONE", fg=typer.colors.GREEN)
 
 @vars_app.command("diff")
 def vars_diff(
