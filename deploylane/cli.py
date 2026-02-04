@@ -47,13 +47,17 @@ from .ymlvars import (
 
 app = typer.Typer(add_completion=True, no_args_is_help=True)
 
+config_app = typer.Typer(no_args_is_help=True, help="Config helpers (debug).")
+app.add_typer(config_app, name="config")
 
-SKIP_PROFILE_BANNER = {
-    "profile-use",
-    "profiles-list",
-    "login", 
-    "logout",
-}
+project_app = typer.Typer(no_args_is_help=True, help="Project helpers.")
+app.add_typer(project_app, name="project")
+
+vars_app = typer.Typer(no_args_is_help=True, help="Manage GitLab project variables via YAML.")
+app.add_typer(vars_app, name="vars")
+
+profile_app = typer.Typer(no_args_is_help=True, help="Manage local profiles.")
+app.add_typer(profile_app, name="profile")
 
 @app.callback(invoke_without_command=False)
 def _global_callback(ctx: typer.Context) -> None:
@@ -61,17 +65,11 @@ def _global_callback(ctx: typer.Context) -> None:
     if getattr(ctx, "resilient_parsing", False):
         return
 
-    # IMPORTANT: actual command name
-    sub = (ctx.invoked_subcommand or "").strip()
-
-    if sub in SKIP_PROFILE_BANNER:
-        return
-
     cfg = load_config()
     active = get_active_profile_name(cfg)
     prof = get_profile(cfg, active)
-
-    typer.secho(f"▶ profile: {active}", fg=typer.colors.GREEN, bold=True)
+    host = prof.host if prof else "-"
+    typer.secho(f"▶ profile: {active} -- host: {host}", fg=typer.colors.GREEN, bold=True)
     if prof is None:
         typer.secho("  (not logged in for this profile)", fg=typer.colors.YELLOW)
 
@@ -194,7 +192,7 @@ def logout(
         typer.secho(f"No such profile: {target}", fg=typer.colors.YELLOW)
 
 
-@app.command()
+@config_app.command('show')
 def config_show():
     """Print config path and active profile (debug helper)."""
     cfg = load_config()
@@ -202,14 +200,7 @@ def config_show():
     typer.echo(f"active : {get_active_profile_name(cfg)}")
 
 
-@app.command()
-def host_normalize(host: str):
-    """Debug helper: show the normalized host."""
-    typer.echo(normalize_host(host))
-
-
-
-@app.command("projects-list")
+@project_app.command("list")
 def projects_list(
     search: Optional[str] = typer.Option(None, "--search", help="Search projects by name/path"),
     owned: bool = typer.Option(False, "--owned", help="Only projects owned by the user"),
@@ -248,7 +239,7 @@ def projects_list(
             f"{p.web_url or '-'}"
         )
         
-@app.command("vars-get")
+@vars_app.command("get")
 def vars_get(
     ctx: typer.Context,
     project: Optional[str] = typer.Option(None, "--project", help="Project path_with_namespace"),
@@ -294,7 +285,7 @@ def vars_get(
     typer.secho("OK", fg=typer.colors.GREEN)
     typer.echo(f"Saved → {out}")
 
-@app.command("vars-apply")
+@vars_app.command("apply")
 def vars_set(
     ctx: typer.Context,
     file: Path = typer.Option(DEFAULT_FILE, "--file", help="YAML file to apply"),
@@ -348,7 +339,7 @@ def vars_set(
     
 
 
-@app.command("vars-diff")
+@vars_app.command("diff")
 def vars_diff(
     project: str = typer.Option(..., "--project", help="Project path_with_namespace (e.g. sachane/sachane-next)"),
     file: Optional[Path] = typer.Option(None, "--file", help="YAML file path (default: .deploylane/vars.yml)"),
@@ -499,7 +490,7 @@ def vars_diff(
     if exit_code:
         raise typer.Exit(code=2)
 
-@app.command("profiles-list")
+@profile_app.command("list")
 def profiles_list() -> None:
     """List stored profiles and show the active one."""
     cfg = load_config()
@@ -520,23 +511,44 @@ def profiles_list() -> None:
     typer.echo("")
     typer.echo(f"Active profile: {active}")
 
-@app.command("profile-use")
+@profile_app.command("use")
 def profile_use(
-    profile: str = typer.Option(..., "--profile", help="Profile name to activate"),
-) -> None:
-    """Set active profile (does not modify credentials)."""
+    profile: Optional[str] = typer.Argument(
+        None,
+        help="Profile name to activate",
+        show_default=False,
+    ),
+):
     cfg = load_config()
 
-    profiles = cfg.get("profiles", {})
-    if not isinstance(profiles, dict) or profile not in profiles:
-        _err(f"Profile not found: {profile}. Use: dlane profiles-list")
+    # If not provided, prompt user
+    if not profile:
+        # List profiles to help selection
+        profiles = cfg.get("profiles", {})
+        names = sorted(profiles.keys()) if isinstance(profiles, dict) else []
+
+        if not names:
+            typer.secho("No profiles found. Run `dlane login --profile <name>` first.", fg=typer.colors.RED)
+            raise typer.Exit(1)
+
+        typer.echo("Available profiles:")
+        for n in names:
+            typer.echo(f"  - {n}")
+
+        profile = typer.prompt("Profile to activate")
+
+    # Validate existence
+    prof = get_profile(cfg, profile)
+    if not prof:
+        typer.secho(f"Profile not found: {profile}", fg=typer.colors.RED)
+        raise typer.Exit(1)
 
     set_active_profile_name(cfg, profile)
     save_config(cfg)
 
-    typer.secho("OK", fg=typer.colors.GREEN)
-    typer.echo(f"Active profile set to: {profile}")
-    typer.echo(f"Config: {config_path()}")
+    typer.secho("Active profile updated.", fg=typer.colors.GREEN)
+    typer.echo(f"active : {profile}")
+    typer.echo(f"host   : {prof.host}")
 
 if __name__ == "__main__":
     app()
