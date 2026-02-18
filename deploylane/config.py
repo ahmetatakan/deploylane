@@ -17,12 +17,10 @@ DEFAULT_HOST = "https://gitlab.com"
 
 
 def _config_dir() -> Path:
-    """Return the local config directory path."""
     return Path.home() / ".config" / APP_DIR_NAME
 
 
 def config_path() -> Path:
-    """Return the config file path."""
     return _config_dir() / "config.toml"
 
 
@@ -35,12 +33,13 @@ def _read_toml(path: Path) -> Dict[str, Any]:
 
 def _write_toml(path: Path, data: Dict[str, Any]) -> None:
     """
-    Minimal TOML writer to avoid adding a new dependency.
-    Supports only the structure we use:
+    Minimal TOML writer (no extra dependency).
+    Supports:
       active_profile = "..."
       [profiles."name"]
       host = "..."
       token = "..."
+      registry_host = "..."
     """
     lines: list[str] = []
 
@@ -51,15 +50,32 @@ def _write_toml(path: Path, data: Dict[str, Any]) -> None:
 
     profiles = data.get("profiles", {})
     if isinstance(profiles, dict):
-        for name, p in profiles.items():
+        for name in sorted(profiles.keys(), key=lambda s: str(s).lower()):
+            p = profiles.get(name)
             if not isinstance(p, dict):
                 continue
             lines.append(f'[profiles."{name}"]')
-            for k, v in p.items():
+
+            # deterministic key order
+            for k in ["host", "token", "registry_host"]:
+                if k not in p:
+                    continue
+                v = p.get(k)
                 if v is None:
                     continue
                 vv = str(v).replace('"', '\\"')
                 lines.append(f'{k} = "{vv}"')
+
+            # write any other keys deterministically
+            for k in sorted(p.keys(), key=lambda s: str(s).lower()):
+                if k in ("host", "token", "registry_host"):
+                    continue
+                v = p.get(k)
+                if v is None:
+                    continue
+                vv = str(v).replace('"', '\\"')
+                lines.append(f'{k} = "{vv}"')
+
             lines.append("")
 
     ensure_dir(path.parent)
@@ -72,7 +88,7 @@ class Profile:
     name: str
     host: str
     token: str
-    registry_host: str = ""   # Docker registry host (example: registry-gitlab.example.com)
+    registry_host: str = ""  # optional
 
 
 def load_config() -> Dict[str, Any]:
@@ -99,7 +115,12 @@ def upsert_profile(cfg: Dict[str, Any], profile: Profile) -> None:
     if not isinstance(profiles, dict):
         profiles = {}
         cfg["profiles"] = profiles
-    profiles[profile.name] = {"host": profile.host, "token": profile.token}
+
+    profiles[profile.name] = {
+        "host": profile.host,
+        "token": profile.token,
+        "registry_host": (profile.registry_host or "").strip(),
+    }
 
 
 def get_profile(cfg: Dict[str, Any], name: str) -> Optional[Profile]:
@@ -117,7 +138,16 @@ def get_profile(cfg: Dict[str, Any], name: str) -> Optional[Profile]:
     if not host.strip() or not token.strip():
         return None
 
-    return Profile(name=name, host=host.strip(), token=token.strip())
+    registry_host = p.get("registry_host", "")
+    if not isinstance(registry_host, str):
+        registry_host = ""
+
+    return Profile(
+        name=name,
+        host=host.strip(),
+        token=token.strip(),
+        registry_host=registry_host.strip(),
+    )
 
 
 def delete_profile(cfg: Dict[str, Any], name: str) -> bool:
@@ -131,7 +161,6 @@ def delete_profile(cfg: Dict[str, Any], name: str) -> bool:
 
 
 def normalize_host(host: str) -> str:
-    """Normalize host input to a stable URL base (no trailing slash)."""
     h = host.strip()
     if not h:
         return DEFAULT_HOST
@@ -143,10 +172,13 @@ def normalize_host(host: str) -> str:
 
 
 def env_fallback_token() -> str | None:
-    """Environment fallback for non-interactive use (CI/CD)."""
     return os.getenv("GITLAB_TOKEN") or os.getenv("GITLAB_PAT") or os.getenv("DLANE_TOKEN")
 
 
 def env_fallback_host() -> str | None:
-    """Environment fallback for non-interactive use (CI/CD)."""
     return os.getenv("GITLAB_HOST") or os.getenv("DLANE_HOST")
+
+
+def env_fallback_registry_host() -> str | None:
+    # optional convenience
+    return os.getenv("GITLAB_REGISTRY_HOST") or os.getenv("DLANE_REGISTRY_HOST")
