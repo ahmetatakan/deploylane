@@ -1,243 +1,200 @@
 # DeployLane (dlane)
 
-GitLab-focused deployment helper CLI for **deterministic** CI/CD operations:
-- Store GitLab credentials locally (not in repo)
-- List projects
-- Manage **project variables** via a local YAML file (export/apply/diff)
-- Keep infra workflows reproducible without coupling to Git state
+GitLab-focused deployment helper CLI for **deterministic CI/CD
+operations**.
 
-> **Important:** `.deploylane/` is local-only. Do not commit it.
+DeployLane helps you manage GitLab project variables and deployment
+workflows in a reproducible and auditable way — without committing
+secrets into repositories.
 
----
+------------------------------------------------------------------------
 
-## What is DeployLane?
+## 🚀 What is DeployLane?
 
-DeployLane is a small CLI that sits between your workstation and GitLab:
-- You log in once (PAT stored in `~/.config/deploylane/config.toml`)
-- You can export GitLab project variables into a local YAML file
-- You can edit YAML, then apply changes back to GitLab deterministically
-- You can diff local YAML vs GitLab before applying
+DeployLane is a CLI tool that sits between your workstation and GitLab.
 
-This makes GitLab variables manageable as **files**, without placing secrets in app repos.
+It allows you to:
 
----
+-   🔐 Store GitLab credentials locally (not in repo)
+-   📦 Export project variables into a YAML file
+-   🔍 Diff local YAML vs GitLab variables
+-   📋 Generate deterministic deployment plans
+-   🧾 Produce reproducible `.env` files
+-   🧮 Generate deployment proof manifests (hash-based audit artifacts)
 
-## Install
+All operations are deterministic and reproducible.
 
-### From PyPI
-```bash
+> ⚠️ `.deploylane/` is local-only. Do NOT commit it.
+
+------------------------------------------------------------------------
+
+# 📦 Installation
+
+``` bash
 pip install deploylane
 ```
 
-### Run
-```bash
+Run:
+
+``` bash
 dlane --help
 ```
 
----
+------------------------------------------------------------------------
 
-## Authentication
+# 🔐 Authentication
 
-### Create a GitLab Personal Access Token (PAT)
-In GitLab UI:
-- **User Settings → Access Tokens**
-- Scopes (minimum recommended):
-  - `read_api` (for listing projects, reading variables)
-  - `api` (required if you want to set/update variables)
+## Create a GitLab Personal Access Token (PAT)
 
-> If you only read, `read_api` can be enough. For writes, you usually need `api`.
+In GitLab:
 
-### Login (interactive)
-```bash
+User Settings → Access Tokens
+
+Scopes:
+
+-   `read_api`
+-   `api`
+
+------------------------------------------------------------------------
+
+## Login (interactive)
+
+``` bash
 dlane login --host https://gitlab.example.com
 ```
 
-If you omit `--host`, it uses the default or prompts.
+Optional:
 
-### Login (non-interactive / CI-friendly)
-```bash
+``` bash
+dlane login --profile prod --host https://gitlab.example.com --registry-host registry.example.com
+```
+
+------------------------------------------------------------------------
+
+## Login (non-interactive)
+
+``` bash
 export GITLAB_HOST="https://gitlab.example.com"
 export GITLAB_TOKEN="glpat-xxxx"
+
 dlane login --non-interactive
 ```
 
-### Status / WhoAmI
-```bash
+------------------------------------------------------------------------
+
+## Status
+
+``` bash
 dlane status
-dlane whoami
 ```
 
-### Logout
-```bash
-dlane logout
+------------------------------------------------------------------------
+
+# ⚙️ Profiles
+
+Config file:
+
+    ~/.config/deploylane/config.toml
+
+Commands:
+
+``` bash
+dlane config show
+dlane profile list
+dlane profile use <name>
 ```
 
----
+------------------------------------------------------------------------
 
-## Config & Profiles
+# 📁 Projects
 
-DeployLane stores credentials locally:
-
-- Config path:
-  - `~/.config/deploylane/config.toml`
-- Supports profiles (e.g. `default`, `staging`, `prod`)
-
-Example:
-```bash
-dlane login --profile default --host https://gitlab.example.com
-dlane login --profile corp --host https://gitlab.example.com
+``` bash
+dlane project list
+dlane project list --search my-app
+dlane project list --owned
 ```
 
-Switching active profile is handled by whichever profile was last set as active (per your CLI logic).
+------------------------------------------------------------------------
 
-Debug:
-```bash
-dlane config-show
-dlane host-normalize --host gitlab.example.com
+# 🔑 Variables
+
+Default location:
+
+    .deploylane/vars.yml
+
+Export:
+
+``` bash
+dlane vars get --project group/project
 ```
 
----
+Plan:
 
-## Projects
-
-List projects visible to your token:
-
-```bash
-dlane projects-list
+``` bash
+dlane vars plan --file .deploylane/vars.yml
 ```
 
-Search:
-```bash
-dlane projects-list --search <project>
+Diff:
+
+``` bash
+dlane vars diff --project group/project
 ```
 
-Owned only:
-```bash
-dlane projects-list --owned
+Apply:
+
+``` bash
+dlane vars apply --file .deploylane/vars.yml
 ```
 
-Membership filtering:
-```bash
-dlane projects-list --membership
-dlane projects-list --no-membership
+Prune:
+
+``` bash
+dlane vars prune --file .deploylane/vars.yml --yes
 ```
 
----
+------------------------------------------------------------------------
 
-## Variables (Project-level)
+# 🚀 Deployment
 
-DeployLane uses a **local YAML file** to manage GitLab project variables.
+Plan:
 
-### Default file location
-By default, you can keep it in the repository root but **not committed**:
-
-- `.deploylane/vars.yml`
-
-> This is local-only state. Add it to `.gitignore`.
-
-### Export variables (GitLab → YAML)
-```bash
-dlane vars-get --project <group>/<project>
+``` bash
+dlane deploy plan --target prod
 ```
 
-Write to a specific file:
-```bash
-dlane vars-get --project <group>/<project> --out .deploylane/vars.yml
+Render:
+
+``` bash
+dlane deploy render --target prod
 ```
 
-If the project has no variables, DeployLane writes a **demo template** so you can start editing immediately.
+Proof:
 
-### Diff (YAML vs GitLab)
-```bash
-dlane vars-diff --project <group>/<project>
+``` bash
+dlane deploy proof --target prod
 ```
 
-Use a specific YAML file:
-```bash
-dlane vars-diff --project <group>/<project> --file .deploylane/vars.yml
-```
+------------------------------------------------------------------------
 
-### Apply (YAML → GitLab)
-This will create/update variables defined in YAML.
+# 🔐 Security
 
-```bash
-dlane vars-apply --project <group>/<project>
-```
+Add to `.gitignore`:
 
-Or:
-```bash
-dlane vars-apply --project <group>/<project> --file .deploylane/vars.yml
-```
+    .deploylane/
+    *.env
+    .env
 
-> Current behavior: applies all entries in YAML (create/update).  
-> Deletions are intentionally **not** handled yet.
+------------------------------------------------------------------------
 
----
+# 🛠 Development
 
-## YAML Format
-
-Example `.deploylane/vars.yml`:
-
-```yaml
-project: <group>/<project>
-scope: "*"
-variables:
-  PROD_HOST:
-    value: 192.168.1.2
-    masked: true
-    protected: true
-    environment_scope: "*"
-  REGISTRY_USER:
-    value: gitlab+deploy-token-1
-    masked: true
-    protected: true
-    environment_scope: "*"
-```
-
-Notes:
-- `scope: "*"` is currently informational (kept for future expansion).
-- `environment_scope` controls GitLab variable environment targeting.
-
----
-
-## Security Notes (Very important)
-
-- Do **NOT** commit `.deploylane/vars.yml` if it contains secrets.
-- Prefer storing sensitive values in GitLab variables and pulling them when needed.
-- Local `.deploylane/` is for deterministic management, but it’s still sensitive.
-
-Recommended `.gitignore`:
-```gitignore
-.deploylane/
-*.env
-.env
-```
-
----
-
-## Roadmap (next steps)
-
-- Safer apply:
-  - `--dry-run` (show changes without applying)
-  - `--only KEY1,KEY2` (apply subset)
-- Optional deletion flow:
-  - explicit `vars-delete KEY` (single variable)
-- Group/instance variable support (future)
-- Deployment helpers (later):
-  - ship compose / snippets as artifacts (Generic Packages)
-  - deterministic server-side fetch + apply
-
----
-
-## Development
-
-Run locally:
-```bash
-dlane --help
-```
-
-Build (requires `build`):
-```bash
+``` bash
 pip install build
 python -m build
+```
+
+Dev install:
+
+``` bash
+pip install -e ".[dev]"
 ```
