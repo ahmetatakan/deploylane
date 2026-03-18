@@ -1,0 +1,14 @@
+services:
+  {{app_name}}_blue:
+    image: ${REGISTRY_HOST}/{{gitlab_project}}:${{{tag_key}}_BLUE}
+    ports:
+      - "${APP_PORT_BLUE}:8080"
+    env_file: .env
+    restart: unless-stopped
+
+  {{app_name}}_green:
+    image: ${REGISTRY_HOST}/{{gitlab_project}}:${{{tag_key}}_GREEN}
+    ports:
+      - "${APP_PORT_GREEN}:8080"
+    env_file: .env
+    restart: unless-stopped

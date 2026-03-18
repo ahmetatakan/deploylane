@@ -1,4 +1,5 @@
 prune .deploylane
+prune .workspace
 global-exclude *.vars.yml
 
 # Exclude dev artifacts

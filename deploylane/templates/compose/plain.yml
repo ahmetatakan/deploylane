@@ -1,0 +1,7 @@
+services:
+  {{app_name}}:
+    image: ${REGISTRY_HOST}/{{gitlab_project}}:${{{tag_key}}}
+    ports:
+      - "${APP_PORT}:8080"
+    env_file: .env
+    restart: unless-stopped

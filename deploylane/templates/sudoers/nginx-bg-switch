@@ -1,0 +1,8 @@
+Defaults:{{deploy_user}} !requiretty
+
+Cmnd_Alias NGINX_TEST         = /usr/sbin/nginx -t
+Cmnd_Alias NGINX_RELOAD       = /usr/bin/systemctl reload nginx
+Cmnd_Alias NGINX_LINK_BLUE    = /usr/bin/ln -sf /etc/nginx/snippets/{{app_name}}-upstream-blue.conf /etc/nginx/snippets/{{app_name}}-upstream.conf
+Cmnd_Alias NGINX_LINK_GREEN   = /usr/bin/ln -sf /etc/nginx/snippets/{{app_name}}-upstream-green.conf /etc/nginx/snippets/{{app_name}}-upstream.conf
+
+{{deploy_user}} ALL=(root) NOPASSWD: NGINX_TEST, NGINX_RELOAD, NGINX_LINK_BLUE, NGINX_LINK_GREEN
