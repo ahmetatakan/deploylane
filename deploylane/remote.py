@@ -84,12 +84,34 @@ def copy_dir(local_dir: Path, dest: str, remote_dir: str, dry_run: bool = True) 
     scp_dir(local_dir, dest, remote_dir, dry_run=dry_run)
     return "scp"
 
+def copy_file(local_file: Path, dest: str, remote_path: str, dry_run: bool = True) -> None:
+    """Copy a single local file to a remote path via scp."""
+    require_tools("scp")
+    remote_dir = remote_path.rsplit("/", 1)[0] if "/" in remote_path else "."
+    ssh_mkdir(dest, remote_dir, dry_run=dry_run)
+    run_cmd(["scp", str(local_file.resolve()), f"{dest}:{remote_path}"], dry_run=dry_run)
+
+
 def ssh_run(dest: str, remote_cmd: str, dry_run: bool = True) -> None:
     """
     Run a single remote shell command via ssh.
     remote_cmd is passed as one argument to remote shell.
     """
     run_cmd(["ssh", dest, remote_cmd], dry_run=dry_run)
+
+
+def ssh_run_interactive(dest: str, remote_cmd: str, dry_run: bool = True) -> None:
+    """
+    Run a remote command with a TTY (-t) so sudo password prompts work interactively.
+    """
+    argv = ["ssh", "-t", dest, remote_cmd]
+    print("+ " + " ".join(argv))
+    if dry_run:
+        return
+    require_tools("ssh")
+    result = subprocess.run(argv)
+    if result.returncode != 0:
+        raise RemoteError(f"Remote command exited with code {result.returncode}")
 
 
 def ssh_symlink(dest: str, target_path: str, link_path: str, dry_run: bool = True) -> None:

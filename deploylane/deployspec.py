@@ -26,6 +26,7 @@ class DeployTarget:
     service_green: str = ""
     port_blue: int = 0
     port_green: int = 0
+    port_plain: int = 0
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,14 @@ def load_deployspec(path: Path) -> DeploySpec:
         except Exception:
             return 0
 
+    # top-level strategy (fallback for per-target)
+    top_strategy = str(raw.get("strategy") or "plain").strip().lower()
+
+    # top-level app section (fallback for per-target)
+    app_raw = raw.get("app") or {}
+    top_app_name = str(app_raw.get("name") or "").strip()
+    top_registry_host = str(app_raw.get("registry_host") or "").strip()
+
     targets: Dict[str, DeployTarget] = {}
     for name, tr in targets_raw.items():
         if not isinstance(name, str) or not isinstance(tr, dict):
@@ -74,15 +83,15 @@ def load_deployspec(path: Path) -> DeploySpec:
         if not host.strip() or not user.strip() or not deploy_dir.strip():
             continue
 
-        strategy = tr.get("strategy", "plain")
+        strategy = tr.get("strategy") or top_strategy
         if not isinstance(strategy, str):
-            strategy = "plain"
+            strategy = top_strategy
 
-        app_name = tr.get("app_name", tr.get("app", "next"))
+        app_name = tr.get("app_name", tr.get("app", "")) or top_app_name or "next"
         if not isinstance(app_name, str) or not app_name.strip():
             app_name = "next"
 
-        registry_host = tr.get("registry_host", "")
+        registry_host = tr.get("registry_host", "") or top_registry_host
         if not isinstance(registry_host, str):
             registry_host = ""
         registry_host = registry_host.strip()
@@ -95,8 +104,16 @@ def load_deployspec(path: Path) -> DeploySpec:
         service_green = tr.get("service_green", "")
         health_host = tr.get("health_host", "")
 
-        port_blue = tr.get("port_blue", 0)
-        port_green = tr.get("port_green", 0)
+        # support both flat (port_blue) and nested (ports.blue/green/plain) formats
+        ports_raw = tr.get("ports") or {}
+        if isinstance(ports_raw, dict):
+            port_blue  = ports_raw.get("blue",  tr.get("port_blue",  0))
+            port_green = ports_raw.get("green", tr.get("port_green", 0))
+            port_plain = ports_raw.get("plain", ports_raw.get("blue", tr.get("port_plain", tr.get("port_blue", 0))))
+        else:
+            port_blue  = tr.get("port_blue",  0)
+            port_green = tr.get("port_green", 0)
+            port_plain = tr.get("port_plain", tr.get("port_blue", 0))
 
         targets[name] = DeployTarget(
             name=name,
@@ -110,6 +127,7 @@ def load_deployspec(path: Path) -> DeploySpec:
             service_green=str(service_green or "").strip(),
             port_blue=_to_int(port_blue),
             port_green=_to_int(port_green),
+            port_plain=_to_int(port_plain),
             health_host=str(health_host or "").strip(),
             env_scope=env_scope.strip(),
         )

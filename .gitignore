@@ -26,8 +26,11 @@ Thumbs.db
 
 # ---- Project-specific (DO NOT COMMIT SECRETS) ----
 .deploylane/
+.workspace/
 *.vars.yml
 vars.yml
+workspace.yml
+
 
 # Optional: local logs
 *.log
