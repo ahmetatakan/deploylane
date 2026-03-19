@@ -4,8 +4,9 @@ from typing import Optional
 
 import typer
 
+from ..auth import get_provider
 from ..config import load_config, get_active_profile_name, get_profile
-from ..gitlab import list_projects, GitLabError
+from ..providers.base import ProviderError
 from ._utils import _err
 
 project_app = typer.Typer(no_args_is_help=True, help="Browse GitLab repositories.")
@@ -25,15 +26,10 @@ def projects_list(
     if prof is None:
         _err(f"Not logged in (active profile '{active}'). Run: dlane login --profile {active}")
 
+    provider = get_provider(prof)
     try:
-        projects = list_projects(
-            host=prof.host,
-            token=prof.token,
-            search=search,
-            owned=owned,
-            membership=membership,
-        )
-    except GitLabError as e:
+        projects = provider.list_projects(search=search, owned=owned, membership=membership)
+    except ProviderError as e:
         _err(str(e))
 
     if not projects:
@@ -41,12 +37,12 @@ def projects_list(
         typer.echo("Try: dlane gitlab list --no-membership  (or --owned)")
         raise typer.Exit(code=0)
 
-    projects = sorted(projects, key=lambda p: p.path_with_namespace.lower())
+    projects = sorted(projects, key=lambda p: p.path.lower())
     projects = projects[:limit]
 
     for p in projects:
         typer.echo(
-            f"{p.id}\t{p.path_with_namespace}\t"
+            f"{p.id}\t{p.path}\t"
             f"{p.default_branch or '-'}\t"
             f"{p.web_url or '-'}"
         )

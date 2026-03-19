@@ -43,17 +43,43 @@ def _url(host: str, path: str) -> str:
     return f"{host}/api/v4{path}"
 
 
+def _unreachable_error(host: str, cause: Exception) -> GitLabError:
+    return GitLabError(
+        f"Cannot reach GitLab at {host}\n"
+        f"  Check the host URL and your network connection.\n"
+        f"  If the URL is wrong, run: dlane login --host <correct-url>\n"
+        f"  Cause: {cause}"
+    )
+
+
+def _auth_error(host: str) -> GitLabError:
+    return GitLabError(
+        f"Authentication failed for {host}\n"
+        f"  Your token may be invalid, expired, or missing the 'api' scope.\n"
+        f"  Fix: GitLab → User Settings → Access Tokens → create a token with 'api' scope\n"
+        f"  Then run: dlane login --host {host}"
+    )
+
+
+def _scope_error(host: str) -> GitLabError:
+    return GitLabError(
+        f"Access denied. Your token is missing the required 'api' scope.\n"
+        f"  Fix: GitLab → User Settings → Access Tokens → enable 'api' scope\n"
+        f"  Then run: dlane login --host {host}"
+    )
+
+
 def whoami(host: str, token: str, timeout_s: int = 15) -> GitLabUser:
     url = _url(host, "/user")
     try:
         r = requests.get(url, headers=_headers(token), timeout=timeout_s)
     except requests.RequestException as e:
-        raise GitLabError(f"GitLab unreachable: {e}") from e
+        raise _unreachable_error(host, e) from e
 
     if r.status_code == 401:
-        raise GitLabError("Unauthorized (token invalid or expired).")
+        raise _auth_error(host)
     if r.status_code >= 400:
-        raise GitLabError(f"GitLab error {r.status_code}: {r.text[:300]}")
+        raise GitLabError(f"Unexpected response from GitLab (HTTP {r.status_code}).")
 
     data = r.json()
     return GitLabUser(
@@ -89,12 +115,12 @@ def list_projects(
         try:
             r = requests.get(url, headers=_headers(token), params=params, timeout=timeout_s)
         except requests.RequestException as e:
-            raise GitLabError(f"GitLab unreachable: {e}") from e
+            raise _unreachable_error(host, e) from e
 
         if r.status_code == 401:
-            raise GitLabError("Unauthorized (token invalid or expired).")
+            raise _auth_error(host)
         if r.status_code >= 400:
-            raise GitLabError(f"GitLab error {r.status_code}: {r.text[:300]}")
+            raise GitLabError(f"Unexpected response from GitLab (HTTP {r.status_code}).")
 
         items = r.json()
         if not isinstance(items, list) or not items:
@@ -125,14 +151,20 @@ def get_project_by_path(host: str, token: str, path_with_namespace: str, timeout
     try:
         r = requests.get(url, headers=_headers(token), timeout=timeout_s)
     except requests.RequestException as e:
-        raise GitLabError(f"GitLab unreachable: {e}") from e
+        raise _unreachable_error(host, e) from e
 
-    if r.status_code in (401, 403):
-        raise GitLabError("Not authorized. Token may be invalid or missing scope.")
+    if r.status_code == 401:
+        raise _auth_error(host)
+    if r.status_code == 403:
+        raise _scope_error(host)
     if r.status_code == 404:
-        raise GitLabError(f"Project not found: {path_with_namespace}")
+        raise GitLabError(
+            f"Project not found: '{path_with_namespace}'\n"
+            f"  Check the project path in your deploy.yml or workspace.yml.\n"
+            f"  Browse available projects: dlane gitlab list --search <name>"
+        )
     if r.status_code != 200:
-        raise GitLabError(f"GitLab API error: {r.status_code} {r.text[:300]}")
+        raise GitLabError(f"Unexpected response from GitLab (HTTP {r.status_code}).")
 
     data = r.json()
     return Project(
@@ -159,12 +191,14 @@ def list_project_variables(host: str, token: str, project_id: int, timeout_s: in
         try:
             r = requests.get(url, headers=_headers(token), params=params, timeout=timeout_s)
         except requests.RequestException as e:
-            raise GitLabError(f"GitLab unreachable: {e}") from e
+            raise _unreachable_error(host, e) from e
 
-        if r.status_code in (401, 403):
-            raise GitLabError("Not authorized. Token may be invalid or missing scope.")
+        if r.status_code == 401:
+            raise _auth_error(host)
+        if r.status_code == 403:
+            raise _scope_error(host)
         if r.status_code != 200:
-            raise GitLabError(f"GitLab API error: {r.status_code} {r.text[:300]}")
+            raise GitLabError(f"Unexpected response from GitLab (HTTP {r.status_code}).")
 
         items = r.json()
         if not isinstance(items, list) or not items:
@@ -238,37 +272,42 @@ def set_project_variable(
         try:
             r2 = requests.put(put_url, headers=headers, params=params, data=payload_update, timeout=timeout_s)
         except requests.RequestException as e:
-            raise GitLabError(f"GitLab unreachable: {e}") from e
+            raise _unreachable_error(host, e) from e
 
         if r2.status_code in (200, 201):
             return
-        if r2.status_code in (401, 403):
-            raise GitLabError("Not authorized (token invalid or missing scope).")
+        if r2.status_code == 401:
+            raise _auth_error(host)
+        if r2.status_code == 403:
+            raise _scope_error(host)
         if r2.status_code == 409:
             raise GitLabError(
-                f"GitLab API error (update): 409 {r2.text[:300]}\n"
-                f"Hint: Multiple '{key_norm}' variables exist. Check environment_scope in YAML."
+                f"Conflict updating variable '{key_norm}' (env={env_scope}).\n"
+                f"  Multiple variables with the same key exist in GitLab.\n"
+                f"  Fix: check 'environment_scope' values in your vars.yml."
             )
-        raise GitLabError(f"GitLab API error (update): {r2.status_code} {r2.text[:300]}")
+        raise GitLabError(f"Failed to update variable '{key_norm}' (HTTP {r2.status_code}).")
 
     # 1) Try create
     try:
         r = requests.post(base_url, headers=headers, data=payload_create, timeout=timeout_s)
     except requests.RequestException as e:
-        raise GitLabError(f"GitLab unreachable: {e}") from e
+        raise _unreachable_error(host, e) from e
 
     if r.status_code in (200, 201):
         return
 
-    if r.status_code in (401, 403):
-        raise GitLabError("Not authorized (token invalid or missing scope).")
+    if r.status_code == 401:
+        raise _auth_error(host)
+    if r.status_code == 403:
+        raise _scope_error(host)
 
     # 2) Create failed - try update for common "exists" cases
     if r.status_code in (400, 409):
         _do_update()
         return
 
-    raise GitLabError(f"GitLab API error (create): {r.status_code} {r.text[:300]}")
+    raise GitLabError(f"Failed to create variable '{key_norm}' (HTTP {r.status_code}).")
 
 
 def delete_project_variable(
@@ -292,13 +331,15 @@ def delete_project_variable(
     try:
         r = requests.delete(base_url, headers=headers, params=params, timeout=timeout_s)
     except requests.RequestException as e:
-        raise GitLabError(f"GitLab unreachable: {e}") from e
+        raise _unreachable_error(host, e) from e
 
     if r.status_code in (200, 204):
         return
-    if r.status_code in (401, 403):
-        raise GitLabError("Not authorized (token invalid or missing scope).")
+    if r.status_code == 401:
+        raise _auth_error(host)
+    if r.status_code == 403:
+        raise _scope_error(host)
     if r.status_code == 404:
         return
 
-    raise GitLabError(f"GitLab API error (delete): {r.status_code} {r.text[:300]}")
+    raise GitLabError(f"Failed to delete variable '{key_norm}' (HTTP {r.status_code}).")
