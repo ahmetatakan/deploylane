@@ -61,3 +61,12 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["deploylane*"]
+
+[tool.setuptools.package-data]
+"deploylane" = [
+  "scripts/*.sh",
+  "templates/*.sh",
+  "templates/compose/*.yml",
+  "templates/nginx/*.conf",
+  "templates/sudoers/*",
+]
