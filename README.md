@@ -1,107 +1,117 @@
-# DeployLane (dlane)
+# DeployLane
 
-GitLab-focused deployment helper CLI for **deterministic, multi-project CI/CD operations**.
+**Deployment configs as code. GitLab CI variables as code. Reproducible deploys every time.**
 
-DeployLane bridges your workstation and your servers. It scaffolds server-side deployment files, manages GitLab CI variables, and keeps everything in sync — so your CI pipeline only needs to call `deploy.sh` on the server.
+DeployLane is a CLI for teams deploying containerized apps to Linux servers with Docker Compose and GitLab CI. It replaces scattered shell scripts and manually managed CI variables with a single, version-controlled workflow.
 
-------------------------------------------------------------------------
+```bash
+pip install deploylane
+dlane login --host https://gitlab.example.com
+dlane scaffold my-service
+dlane deploy push my-service --yes
+```
+
+---
+
+## Is this for you?
+
+DeployLane fits your stack if:
+
+- ✅ You deploy Docker Compose apps to Linux servers (VPS, bare metal, cloud VMs)
+- ✅ You use GitLab CI to build and push images
+- ✅ You manage CI variables manually in the GitLab UI and it's becoming a mess
+- ✅ You want zero-downtime blue-green deploys without Kubernetes complexity
+
+It's probably not for you if you're on Kubernetes, AWS ECS, or a fully managed PaaS.
+
+---
+
+## The problem it solves
+
+Most teams start with a `deploy.sh` script that "just works." Over time it becomes:
+
+- Different versions on different servers
+- CI variables scattered across projects with no history
+- "Works on staging, broken on prod" because someone changed something manually
+- New team member spends a day figuring out how deployment actually works
+
+DeployLane makes the entire deployment setup **version-controlled and reproducible**.
+
+---
 
 ## How it works
 
 ```
-workstation (dlane)              GitLab CI Pipeline          Server
-─────────────────────            ──────────────────          ──────
-dlane scaffold →                                         .env
-  deploy.yml      →  dlane deploy push →                docker-compose.yml
+Your workstation                  GitLab CI                  Server
+────────────────                  ─────────────              ──────
+dlane scaffold                                           .env
+  deploy.yml     → dlane deploy push →                  docker-compose.yml
   vars.yml                                               deploy.sh
-  compose/*.yml   →  dlane deploy install →              nginx config
+  compose/       → dlane deploy install →               nginx.conf
   nginx/                                                 install.sh (run once)
-  ci/.gitlab-ci.yml
 
-dlane vars get/apply → GitLab variables ← Runner uses these
-                                            ↓
-                                        deploy.sh
+dlane vars apply → GitLab CI variables ← Pipeline uses these
+                                              ↓
+                                          deploy.sh (zero-downtime or restart)
 ```
 
-- **`dlane`** manages server-side files and GitLab variables from your workstation
-- **GitLab CI** builds the Docker image and calls `deploy.sh` on the server
-- **`deploy.sh`** handles container switching (bluegreen) or restart (plain)
+1. **`dlane scaffold`** generates all server-side files from a single `deploy.yml`
+2. **`dlane vars apply`** pushes your local `vars.yml` to GitLab CI variables
+3. **`dlane deploy push`** syncs configs to the server
+4. **GitLab CI** builds the image and calls `deploy.sh` — that's it
 
-------------------------------------------------------------------------
+---
 
 ## Installation
 
 ```bash
 pip install deploylane
-dlane --help
 ```
 
-------------------------------------------------------------------------
+Requires Python 3.10+. Works on macOS and Linux.
 
-## Quick Start
+---
+
+## Quick start (5 minutes)
 
 ### 1. Login
 
 ```bash
 dlane login --host https://gitlab.example.com
-# With profile name and registry
+# optionally name your profile and set a registry host
 dlane login --profile prod --host https://gitlab.example.com --registry-host registry.example.com
 ```
 
 ### 2. Create a workspace
 
+A workspace tracks multiple services together.
+
 ```bash
 mkdir ops && cd ops
-dlane init                                                    # creates .workspace/workspace.yml
+dlane init
 dlane add gateway --gitlab-project acme/gateway --strategy bluegreen
 dlane add api     --gitlab-project acme/api     --strategy plain
 ```
 
-### 3. Scaffold a project
+### 3. Scaffold a service
 
 ```bash
-# Scaffold generates all server-side files from deploy.yml
 dlane scaffold gateway
-
-# If vars.yml already has PROD_HOST etc., deploy.yml is pre-filled automatically
-dlane vars get gateway          # fetch GitLab variables first
-dlane scaffold gateway          # deploy.yml host/user/deploy_dir auto-filled from vars
 ```
 
-### 4. Push to server & install (once per server)
+This generates `.workspace/gateway/.deploylane/` with:
+- `deploy.yml` — targets, ports, strategy (edit this to match your server)
+- `vars.yml` — CI variable definitions (edit values, then `vars apply`)
+- `compose/`, `nginx/`, `scripts/deploy.sh`, `ci/.gitlab-ci.yml`
 
-```bash
-dlane deploy push gateway --yes          # .env + docker-compose.yml + deploy.sh → server
-dlane deploy install gateway --yes       # nginx + sudoers + install.sh → server, runs install.sh
-```
+### 4. Configure your server details
 
-### 5. CI does the rest
-
-Copy `.deploylane/ci/.gitlab-ci.yml` to your project repo. GitLab CI will build, push the image,
-and call `deploy.sh` on the server automatically.
-
-------------------------------------------------------------------------
-
-## Deployment strategies
-
-| Strategy    | Description |
-|-------------|-------------|
-| `bluegreen` | Two containers (blue/green), nginx switches traffic, zero-downtime |
-| `plain`     | Single container, `docker compose up -d`, simple restart |
-
-Staging typically uses `plain`; production uses `bluegreen`. Set per-target in `deploy.yml`.
-
-------------------------------------------------------------------------
-
-## deploy.yml
-
-Source of truth for deployment structure. Never overwritten by scaffold after first creation.
+Edit `.workspace/gateway/.deploylane/deploy.yml`:
 
 ```yaml
 version: 1
 strategy: bluegreen
 project: acme/gateway
-default_target: prod
 
 app:
   name: gateway
@@ -112,345 +122,159 @@ targets:
     host: 10.0.0.1
     user: deploy
     deploy_dir: /home/deploy/gateway
-    env_scope: production
-    strategy: bluegreen
-    health_host: api.acme.com   # optional: nginx health check domain
     ports:
       blue: 8080
       green: 8081
-
-  staging:
-    host: 10.0.0.1
-    user: deploy
-    deploy_dir: /home/deploy/gateway-staging
-    env_scope: staging
-    strategy: plain             # staging typically uses plain
-    ports:
-      blue: 8180
-      green: 8181
 ```
 
-------------------------------------------------------------------------
+### 5. Push CI variables
 
-## vars.yml
-
-Stores GitLab CI variable definitions. Used by `vars get/apply/plan/diff`.
-Also used by scaffold to pre-fill `deploy.yml` (`PROD_HOST` → `targets.prod.host` etc.).
-
-```yaml
-project: acme/gateway
-scope: "*"
-variables:
-  PROD_HOST:
-    value: "10.0.0.1"
-    masked: false
-    protected: false
-    environment_scope: "*"
-  PROD_SSH_KEY:
-    value: "LS0t..."          # base64-encoded private key
-    masked: false
-    protected: false
-    environment_scope: "*"
-  PROD_DEPLOY_DIR:
-    value: "/home/deploy/gateway"
-    masked: true
-    protected: false
-    environment_scope: "*"
-  REGISTRY_USER:
-    value: "gitlab+deploy-token-1"
-    masked: true
-    protected: false
-    environment_scope: "*"
-  REGISTRY_PASS:
-    value: "..."
-    masked: true
-    protected: false
-    environment_scope: "*"
+```bash
+dlane vars plan gateway     # preview what would change
+dlane vars apply gateway    # push to GitLab
 ```
 
-**Standard variable naming convention:**
+### 6. Push files to server & install (once per server)
+
+```bash
+dlane deploy push gateway --yes       # .env + docker-compose.yml + deploy.sh
+dlane deploy install gateway --yes    # nginx + sudoers + runs install.sh
+```
+
+### 7. Add the CI pipeline
+
+Copy `.workspace/gateway/.deploylane/ci/.gitlab-ci.yml` to your `acme/gateway` repo.
+GitLab CI will now build, push, and deploy automatically on every push.
+
+---
+
+## Deployment strategies
+
+| Strategy | How it works | When to use |
+|---|---|---|
+| `bluegreen` | Two containers, nginx switches traffic — zero downtime | Production |
+| `plain` | Single container, `docker compose up -d` | Staging, internal tools |
+
+---
+
+## CI variable management
+
+Stop clicking through the GitLab UI. Manage variables as code:
+
+```bash
+dlane vars get gateway       # pull current GitLab variables → vars.yml
+dlane vars diff gateway      # see what's different between local and GitLab
+dlane vars plan gateway      # preview creates / updates / orphans
+dlane vars apply gateway     # push local vars.yml → GitLab
+dlane vars prune gateway     # remove GitLab variables not in vars.yml
+```
+
+`vars.yml` is version-controlled. Every variable change is a git commit.
+
+**Variable naming convention:**
 
 | Variable | Purpose |
-|----------|---------|
-| `{TARGET}_HOST` | Server IP (e.g. `PROD_HOST`, `STAGING_HOST`) |
+|---|---|
+| `{TARGET}_HOST` | Server IP — e.g. `PROD_HOST`, `STAGING_HOST` |
 | `{TARGET}_USER` | SSH user |
 | `{TARGET}_DEPLOY_DIR` | Deploy directory on server |
-| `{TARGET}_SSH_KEY` | Base64-encoded SSH private key |
+| `{TARGET}_SSH_KEY` | Base64-encoded private key |
 | `REGISTRY_HOST` | Docker registry hostname |
 | `REGISTRY_USER` | Registry login user |
 | `REGISTRY_PASS` | Registry login password |
 
-------------------------------------------------------------------------
+---
 
-## Scaffold
-
-`dlane scaffold <name>` regenerates server-side files from `deploy.yml`. Safe to re-run.
+## Multi-service workspaces
 
 ```bash
-dlane scaffold gateway            # regenerate all files
-dlane scaffold gateway --force    # also overwrite compose/ and ci/ files
+dlane list                          # show all services and their status
+dlane list --tag api                # filter by tag
+dlane deploy push --all --yes       # push all services at once
+dlane vars apply --all              # apply variables for all services
 ```
 
-**File creation rules:**
+---
 
-| File | Behavior |
-|------|---------|
-| `deploy.yml` | Created once; never overwritten by scaffold |
-| `vars.yml` | Created once with standard placeholders; never overwritten |
-| `compose/*.yml` | Created once per strategy; `--force` to regenerate |
-| `ci/.gitlab-ci.yml` | Created once; `--force` to regenerate |
-| `env/{target}.env` | Always regenerated from deploy.yml |
-| `env/{target}.local.env` | Created once (empty); user-managed overrides |
-| `nginx/*.conf` | Always regenerated |
-| `install.sh` | Always regenerated |
-| `deploy.sh` | Always updated |
+## Local overrides
 
-**vars.yml → deploy.yml sync:**
-When scaffold runs and `vars.yml` has non-empty values, it updates `host`, `user`, `deploy_dir`
-in `deploy.yml` automatically. To use a custom value, leave the corresponding vars.yml key empty.
-
-**Generated file structure:**
-
-```
-.deploylane/
-├── deploy.yml                    ← targets, strategy, ports
-├── vars.yml                      ← GitLab CI variable definitions
-├── scripts/
-│   └── deploy.sh                 ← server-side deploy script (bluegreen/plain)
-├── compose/
-│   ├── bluegreen.yml             ← docker-compose for bluegreen strategy
-│   └── plain.yml                 ← docker-compose for plain strategy
-├── env/
-│   ├── prod.env                  ← base .env template for prod
-│   ├── prod.local.env            ← local overrides (gitignored)
-│   ├── staging.env               ← base .env template for staging
-│   └── staging.local.env         ← local overrides (gitignored)
-├── nginx/
-│   ├── gateway-upstream-blue.conf
-│   ├── gateway-upstream-green.conf
-│   └── 00-gateway-upstream.conf
-├── sudoers/
-│   └── nginx-bg-switch           ← sudoers entry for nginx reload
-├── install.sh                    ← one-time server setup script
-└── ci/
-    └── .gitlab-ci.yml            ← GitLab CI pipeline template
-```
-
-------------------------------------------------------------------------
-
-## deploy push
-
-Pushes `.env` + `docker-compose.yml` + `deploy.sh` to the server. Dry run by default.
+Keep production secrets out of git with `.local.env` files:
 
 ```bash
-dlane deploy push gateway                    # dry run (prints scp commands)
-dlane deploy push gateway --yes              # actually push
-dlane deploy push gateway --target staging --yes
-dlane deploy push gateway --yes --all        # push all workspace projects
-dlane deploy push gateway --yes --tag api    # push all projects tagged "api"
-```
-
-**What gets pushed:**
-
-| Local file | → Remote |
-|-----------|---------|
-| `.deploylane/env/prod.env` (+ `prod.local.env` if present) | `{deploy_dir}/.env` |
-| `.deploylane/compose/{strategy}.yml` | `{deploy_dir}/docker-compose.yml` |
-| `.deploylane/scripts/deploy.sh` | `{deploy_dir}/deploy.sh` |
-
-### .local.env — per-target overrides
-
-```bash
-# .deploylane/env/prod.local.env  (gitignored — safe for secrets)
+# .workspace/gateway/.deploylane/env/prod.local.env  (gitignored)
 DATABASE_URL=postgres://prod-db:5432/myapp
-EXTRA_VAR=custom-value
+STRIPE_SECRET=sk_live_...
 ```
 
-Keys in `.local.env` are merged on top of `{target}.env` before pushing. The file is gitignored automatically.
+Local env is merged on top of the base env before pushing. Safe for secrets.
 
-------------------------------------------------------------------------
-
-## deploy install
-
-One-time server setup. Pushes nginx config, sudoers, install.sh and runs it via SSH.
-Prompts for sudo password interactively.
-
-```bash
-dlane deploy install gateway                 # dry run
-dlane deploy install gateway --yes           # push + run install.sh on server
-dlane deploy install gateway --target staging --yes
-```
-
-------------------------------------------------------------------------
-
-## deploy history
-
-```bash
-dlane deploy history gateway
-dlane deploy history gateway --limit 50
-```
-
-------------------------------------------------------------------------
-
-## Variables (GitLab)
-
-```bash
-dlane vars get gateway            # fetch GitLab variables → vars.yml
-dlane vars plan gateway           # preview changes (no write)
-dlane vars diff gateway           # diff local vs GitLab
-dlane vars apply gateway          # push vars.yml → GitLab
-dlane vars prune gateway --yes    # delete GitLab vars not in vars.yml
-```
-
-------------------------------------------------------------------------
-
-## Workspace
-
-```bash
-# Setup
-dlane init                                   # create .workspace/workspace.yml
-dlane add <name> --gitlab-project <g/p> --strategy <strategy>
-dlane add <name> ... --init                  # add + scaffold in one step
-dlane update <name> --strategy bluegreen
-dlane remove <name>
-
-# View
-dlane list                                   # list all projects
-dlane list --tag api                         # filter by tag
-
-# Scaffold
-dlane scaffold <name>
-dlane scaffold <name> --force
-```
-
-### workspace.yml structure
-
-```yaml
-version: 1
-default_profile: default
-
-projects:
-  - name: gateway
-    path: gateway
-    gitlab_project: acme/gateway
-    strategy: bluegreen
-    description: "API Gateway"
-    tags: [api, production]
-
-  - name: frontend
-    path: frontend
-    gitlab_project: acme/frontend
-    strategy: plain
-    tags: [web]
-```
-
-------------------------------------------------------------------------
-
-## Authentication
-
-```bash
-dlane login --host https://gitlab.example.com
-dlane login --profile staging --host https://gitlab.example.com
-dlane logout
-dlane whoami
-dlane status
-
-dlane profile list
-dlane profile use staging
-dlane config show
-```
-
-Config stored at `~/.config/deploylane/config.toml` with `0600` permissions.
-
-**Non-interactive (CI):**
-```bash
-export GITLAB_HOST="https://gitlab.example.com"
-export GITLAB_TOKEN="glpat-xxxx"
-```
-
-------------------------------------------------------------------------
-
-## GitLab project browser
-
-```bash
-dlane gitlab list
-dlane gitlab list --search gateway
-dlane gitlab list --owned
-```
-
-------------------------------------------------------------------------
+---
 
 ## Security
 
-Add to `.gitignore`:
+- GitLab token stored at `~/.config/deploylane/config.toml` with `0600` permissions
+- Masked variables shown as `<masked>` in all output
+- `deploy push` is **dry-run by default** — requires explicit `--yes`
+- `deploy install` requires explicit `--yes` and prompts for sudo password interactively
+- `.local.env` files are gitignored automatically
 
+Add to your `.gitignore`:
 ```
-.deploylane/
-.deploylane/env/*.local.env
+.workspace/
 ```
 
-- GitLab token stored in `~/.config/deploylane/config.toml` (`0600`)
-- Masked variables shown as `<masked>` in plan/diff output
-- `.local.env` files are gitignored — safe for local secrets and overrides
-- `deploy push` is dry-run by default — requires explicit `--yes`
-- `deploy install` requires explicit `--yes` and prompts for sudo password
-
-------------------------------------------------------------------------
+---
 
 ## Command reference
 
 ### Auth
-
 | Command | Description |
-|---------|-------------|
-| `dlane login` | Store GitLab token locally |
+|---|---|
+| `dlane login` | Store credentials locally and verify against the API |
 | `dlane logout` | Remove stored credentials |
-| `dlane whoami` | Show current GitLab user |
+| `dlane whoami` | Show current user for the active profile |
 | `dlane status` | Show active profile and login status |
 | `dlane profile list` | List stored profiles |
 | `dlane profile use <name>` | Switch active profile |
-| `dlane config show` | Show config file path |
 
 ### Workspace
-
 | Command | Description |
-|---------|-------------|
-| `dlane init` | Create `.workspace/workspace.yml` |
-| `dlane add <name>` | Add project to workspace |
-| `dlane update <name>` | Update project fields |
-| `dlane remove <name>` | Remove project from workspace |
-| `dlane list` | List workspace projects with status |
-| `dlane scaffold <name>` | Regenerate `.deploylane/` files from deploy.yml |
+|---|---|
+| `dlane init` | Create workspace in current directory |
+| `dlane add <name>` | Add a service to the workspace |
+| `dlane update <name>` | Update service fields |
+| `dlane remove <name>` | Remove a service |
+| `dlane list` | List services with status |
+| `dlane scaffold <name>` | Generate / refresh deployment files |
 
 ### Variables
-
 | Command | Description |
-|---------|-------------|
-| `dlane vars get <name>` | Fetch GitLab variables → vars.yml |
+|---|---|
+| `dlane vars get <name>` | Fetch GitLab variables → `vars.yml` |
 | `dlane vars plan <name>` | Preview what would change |
-| `dlane vars diff <name>` | Diff local vars.yml vs GitLab |
-| `dlane vars apply <name>` | Push vars.yml → GitLab |
-| `dlane vars prune <name>` | Delete GitLab vars not in vars.yml |
+| `dlane vars diff <name>` | Diff local vs GitLab |
+| `dlane vars apply <name>` | Push `vars.yml` → GitLab |
+| `dlane vars prune <name>` | Delete GitLab vars not in `vars.yml` |
 
 ### Deploy
-
 | Command | Description |
-|---------|-------------|
-| `dlane deploy push <name>` | Push .env + compose + deploy.sh to server |
-| `dlane deploy install <name>` | Push + run install.sh (one-time server setup) |
+|---|---|
+| `dlane deploy push <name>` | Push `.env` + compose + `deploy.sh` to server |
+| `dlane deploy install <name>` | One-time server setup (nginx + sudoers + install.sh) |
 | `dlane deploy history <name>` | Show deployment history |
 
 ### Tools
-
 | Command | Description |
-|---------|-------------|
+|---|---|
 | `dlane gitlab list` | Browse GitLab projects |
 
-------------------------------------------------------------------------
+---
 
 ## Development
 
 ```bash
+git clone https://github.com/yourorg/deploylane
+cd deploylane
 pip install -e ".[dev]"
 python -m build
 ```

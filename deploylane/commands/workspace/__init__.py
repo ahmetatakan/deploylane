@@ -30,8 +30,27 @@ def workspace_init(
     Path(WORKSPACE_DIR_NAME).mkdir(exist_ok=True)
     ws = WorkspaceFile(version=1, projects=[], default_profile="default")
     save_workspace(ws, ws_path)
-    typer.secho(f"Created {ws_path}", fg=typer.colors.GREEN)
-    typer.echo("Next: dlane add <name> --gitlab-project <group/project> --strategy <strategy>")
+    typer.secho(f"Workspace created at {ws_path}", fg=typer.colors.GREEN)
+
+    # Check login status and hint if not logged in
+    try:
+        from ...auth import load_active_profile
+        prof = load_active_profile()
+        typer.secho(f"Logged in as: {prof.host}", fg=typer.colors.CYAN)
+    except Exception:
+        typer.echo("")
+        typer.secho("Not logged in yet.", fg=typer.colors.YELLOW)
+        typer.echo("  Run: dlane login --host https://gitlab.example.com")
+
+    typer.echo("")
+    typer.secho("Getting started:", bold=True)
+    typer.echo("  1) dlane add <name> --gitlab-project <group/project> --strategy bluegreen")
+    typer.echo("  2) dlane scaffold <name>")
+    typer.echo("  3) dlane vars apply <name>")
+    typer.echo("  4) dlane deploy push <name> --yes")
+    typer.echo("  5) dlane deploy install <name> --yes  (once per server)")
+    typer.echo("")
+    typer.echo("  Run 'dlane --help' to see all commands.")
 
 
 def workspace_add(
@@ -85,6 +104,8 @@ def workspace_add(
 
     if init:
         _run_init_in_dir(project_path, strategy=strategy, project=gitlab_project, ws_name=name)
+    else:
+        typer.echo(f"  Next: dlane scaffold {name}")
 
 
 def workspace_update(

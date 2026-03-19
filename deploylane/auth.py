@@ -15,14 +15,31 @@ from .config import (
     normalize_host,
     env_fallback_host,
     env_fallback_token,
+    env_fallback_platform,
     env_fallback_registry_host,
     config_path,
 )
-from .gitlab import whoami, GitLabError
+from .providers.base import Provider, ProviderError
 
 
 class AuthError(RuntimeError):
     pass
+
+
+def get_provider(profile: Profile) -> Provider:
+    """Return the appropriate provider for the given profile."""
+    platform = (getattr(profile, "platform", None) or "gitlab").strip()
+    if platform == "gitlab":
+        from .providers.gitlab import GitLabProvider
+        return GitLabProvider(profile.host, profile.token)
+    if platform == "github":
+        from .providers.github import GitHubProvider
+        return GitHubProvider(profile.host, profile.token)
+    raise AuthError(
+        f"Unsupported platform: '{platform}'.\n"
+        f"  Supported: gitlab, github\n"
+        f"  Set in your profile: dlane login --platform gitlab|github"
+    )
 
 
 @dataclass
@@ -53,9 +70,10 @@ def load_active_profile_with_source() -> Tuple[Profile, str]:
     host = env_fallback_host()
     token = env_fallback_token()
     reg = env_fallback_registry_host() or ""
+    platform = env_fallback_platform() or "gitlab"
 
     if host and token:
-        return Profile(name=active, host=normalize_host(host), token=token, registry_host=reg), "env"
+        return Profile(name=active, host=normalize_host(host), token=token, registry_host=reg, platform=platform), "env"
 
     raise AuthError(
         "Not logged in. Run: dlane login\n"
@@ -63,18 +81,23 @@ def load_active_profile_with_source() -> Tuple[Profile, str]:
     )
 
 
-def login(profile_name: str, host: str, token: str, registry_host: str = "") -> Tuple[Profile, object]:
+def login(profile_name: str, host: str, token: str, registry_host: str = "", platform: str = "gitlab") -> Tuple[Profile, object]:
     """Verify credentials and persist them as the active profile."""
     p = Profile(
         name=profile_name,
         host=normalize_host(host),
         token=token.strip(),
         registry_host=(registry_host or "").strip(),
+        platform=(platform or "gitlab").strip(),
     )
     if not p.token:
-        raise AuthError("Token is empty.")
+        raise AuthError(
+            "Token is empty.\n"
+            "  Provide a GitLab Personal Access Token with 'api' scope.\n"
+            "  GitLab → User Settings → Access Tokens → create token → copy it here."
+        )
 
-    user = whoami(p.host, p.token)
+    user = get_provider(p).whoami()
 
     cfg = load_config()
     upsert_profile(cfg, p)
@@ -142,11 +165,11 @@ def status() -> dict:
 
     if prof:
         try:
-            u = whoami(prof.host, prof.token)
+            u = get_provider(prof).whoami()
             result["logged_in"] = True
             result["username"] = u.username
             result["name"] = u.name
-        except GitLabError:
+        except (ProviderError, AuthError):
             result["logged_in"] = False
     else:
         result["logged_in"] = False

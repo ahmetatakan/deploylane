@@ -89,6 +89,7 @@ class Profile:
     host: str
     token: str
     registry_host: str = ""  # optional
+    platform: str = "gitlab"
 
 
 def load_config() -> Dict[str, Any]:
@@ -120,6 +121,7 @@ def upsert_profile(cfg: Dict[str, Any], profile: Profile) -> None:
         "host": profile.host,
         "token": profile.token,
         "registry_host": (profile.registry_host or "").strip(),
+        "platform": (profile.platform or "gitlab").strip(),
     }
 
 
@@ -142,11 +144,16 @@ def get_profile(cfg: Dict[str, Any], name: str) -> Optional[Profile]:
     if not isinstance(registry_host, str):
         registry_host = ""
 
+    platform = p.get("platform", "gitlab")
+    if not isinstance(platform, str) or not platform.strip():
+        platform = "gitlab"
+
     return Profile(
         name=name,
         host=host.strip(),
         token=token.strip(),
         registry_host=registry_host.strip(),
+        platform=platform.strip(),
     )
 
 
@@ -172,11 +179,25 @@ def normalize_host(host: str) -> str:
 
 
 def env_fallback_token() -> str | None:
-    return os.getenv("GITLAB_TOKEN") or os.getenv("GITLAB_PAT") or os.getenv("DLANE_TOKEN")
+    return (
+        os.getenv("GITLAB_TOKEN")
+        or os.getenv("GITLAB_PAT")
+        or os.getenv("GITHUB_TOKEN")
+        or os.getenv("DLANE_TOKEN")
+    )
 
 
 def env_fallback_host() -> str | None:
-    return os.getenv("GITLAB_HOST") or os.getenv("DLANE_HOST")
+    return os.getenv("GITLAB_HOST") or os.getenv("GITHUB_HOST") or os.getenv("DLANE_HOST")
+
+
+def env_fallback_platform() -> str | None:
+    """Infer platform from environment variables if not set in config."""
+    if os.getenv("GITHUB_TOKEN") or os.getenv("GITHUB_HOST"):
+        return "github"
+    if os.getenv("GITLAB_TOKEN") or os.getenv("GITLAB_PAT") or os.getenv("GITLAB_HOST"):
+        return "gitlab"
+    return os.getenv("DLANE_PLATFORM")
 
 
 def env_fallback_registry_host() -> str | None:

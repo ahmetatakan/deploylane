@@ -158,22 +158,27 @@ variables:
     else:
         typer.secho(f"  Warning: deploy.sh template not found at {script_src}", fg=typer.colors.YELLOW)
 
+    alias = ws_name or project.split("/")[-1]
+
     typer.echo("")
-    typer.secho("Init complete!", fg=typer.colors.GREEN, bold=True)
+    typer.secho("Done!", fg=typer.colors.GREEN, bold=True)
     typer.echo(f"  Project  : {project}")
     typer.echo(f"  Strategy : {resolved_strategy}")
+    typer.echo(f"  Files    : {deploy_yml_path.parent}/")
     typer.echo("")
-    typer.secho("Next steps:", fg=typer.colors.CYAN)
-    typer.echo(f"  1) Edit {deploy_yml_path} (fill in host, user, deploy_dir)")
-    alias = ws_name or project.split("/")[-1]
-    if ws_name:
-        typer.echo(f"  2) dlane vars get {alias}")
-        typer.echo(f"  3) dlane deploy push {alias} --yes")
-        typer.echo(f"  4) dlane deploy install {alias} --yes  (once per server)")
-    else:
-        typer.echo(f"  2) dlane vars get {alias}  (or fill {vars_yml_path} manually)")
-        typer.echo(f"  3) dlane deploy push {alias} --yes")
-        typer.echo(f"  4) dlane deploy install {alias} --yes  (once per server)")
+    typer.secho("Next steps:", fg=typer.colors.CYAN, bold=True)
+    typer.echo(f"  1) Edit {deploy_yml_path}")
+    typer.echo(f"       → Set host, user, deploy_dir for each target")
+    typer.echo(f"  2) Fill in {vars_yml_path}")
+    typer.echo(f"       → Set values for PROD_HOST, PROD_SSH_KEY, REGISTRY_USER, REGISTRY_PASS, etc.")
+    typer.echo(f"  3) dlane vars apply {alias}")
+    typer.echo(f"       → Push variables to GitLab CI")
+    typer.echo(f"  4) dlane deploy push {alias} --yes")
+    typer.echo(f"       → Sync .env + docker-compose.yml + deploy.sh to the server")
+    typer.echo(f"  5) dlane deploy install {alias} --yes")
+    typer.echo(f"       → One-time server setup: nginx + sudoers + install.sh")
+    typer.echo("")
+    typer.echo(f"  Tip: copy {deploy_yml_path.parent}/ci/.gitlab-ci.yml to your project repo")
 
 
 def _run_init_in_dir(

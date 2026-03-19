@@ -5,7 +5,8 @@ from typing import Any, Dict, Optional
 
 import typer
 
-from ..gitlab import GitLabError, get_project_by_path, list_project_variables, set_project_variable
+from ..auth import get_provider
+from ..providers.base import ProviderError
 from ..workspace import load_workspace, project_vars_yml
 from ..ymlvars import read_vars_file, write_vars_file, demo_template, load_vars_yml, _norm_var, VarSpec, _safe_value
 from ._utils import _err, get_active_profile_or_exit
@@ -52,10 +53,11 @@ def vars_get(
     project = next(p for p in ws.projects if p.name == name)
 
     prof = get_active_profile_or_exit()
+    provider = get_provider(prof)
     try:
-        prj = get_project_by_path(prof.host, prof.token, project.gitlab_project)
-        vars_list = list_project_variables(prof.host, prof.token, prj.id)
-    except GitLabError as e:
+        prj = provider.get_project(project.gitlab_project)
+        vars_list = provider.list_variables(prj.id)
+    except ProviderError as e:
         _err(str(e))
 
     if not vars_list:
@@ -95,15 +97,16 @@ def vars_plan(
         _err(f"vars.yml not found: {vars_path}\nRun: dlane vars get {name}")
 
     prof = get_active_profile_or_exit()
+    provider = get_provider(prof)
     data = read_vars_file(vars_path)
     project = str(data.get("project") or "").strip()
     scope_default = _norm_scope(data.get("scope"), "*")
     variables = data.get("variables", {})
 
     try:
-        prj = get_project_by_path(prof.host, prof.token, project)
-        current_vars = list_project_variables(prof.host, prof.token, prj.id)
-    except GitLabError as e:
+        prj = provider.get_project(project)
+        current_vars = provider.list_variables(prj.id)
+    except ProviderError as e:
         _err(str(e))
 
     desired_pairs: set = set()
@@ -164,6 +167,7 @@ def vars_apply(
     ws_path = _resolve_ws(file)
     ws = load_workspace(ws_path)
     prof = get_active_profile_or_exit()
+    provider = get_provider(prof)
 
     if all_projects:
         targets = ws.projects
@@ -188,8 +192,8 @@ def vars_apply(
         variables = data.get("variables", {})
 
         try:
-            prj = get_project_by_path(prof.host, prof.token, gl_project)
-        except GitLabError as e:
+            prj = provider.get_project(gl_project)
+        except ProviderError as e:
             typer.secho(f"[{project.name}] ERROR — {e}", fg=typer.colors.RED)
             total_failed += 1
             continue
@@ -200,8 +204,8 @@ def vars_apply(
         failed = 0
         for key, env_scope, meta in desired_items:
             try:
-                set_project_variable(
-                    host=prof.host, token=prof.token, project_id=prj.id,
+                provider.set_variable(
+                    project_id=prj.id,
                     key=key, value=str(meta.get("value", "")),
                     masked=bool(meta.get("masked", False)),
                     protected=bool(meta.get("protected", False)),
@@ -209,7 +213,7 @@ def vars_apply(
                     variable_type=str(meta.get("variable_type", "env_var") or "env_var").strip() or "env_var",
                 )
                 typer.echo(f"  OK  {key}\tenv={env_scope}")
-            except GitLabError as e:
+            except ProviderError as e:
                 failed += 1
                 typer.echo(f"  FAIL {key}\tenv={env_scope}: {e}")
 
@@ -243,6 +247,7 @@ def vars_diff(
         _err(f"vars.yml not found: {vars_path}\nRun: dlane vars get {name}")
 
     prof = get_active_profile_or_exit()
+    provider = get_provider(prof)
     scope = str(scope or "*").strip() or "*"
 
     try:
@@ -266,9 +271,9 @@ def vars_diff(
         local_vars[(key, spec.environment_scope)] = spec
 
     try:
-        prj = get_project_by_path(prof.host, prof.token, project)
-        remote_items = list_project_variables(prof.host, prof.token, prj.id)
-    except Exception as e:
+        prj = provider.get_project(project)
+        remote_items = provider.list_variables(prj.id)
+    except ProviderError as e:
         _err(str(e))
 
     remote_vars: Dict = {}

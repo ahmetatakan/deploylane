@@ -9,6 +9,7 @@ from ..auth import (
     logout as do_logout,
     load_active_profile,
     status as do_status,
+    get_provider,
     AuthError,
 )
 from ..config import (
@@ -23,7 +24,7 @@ from ..config import (
     env_fallback_token,
     normalize_host,
 )
-from ..gitlab import whoami as gl_whoami, GitLabError
+from ..providers.base import ProviderError
 from ._utils import _err
 
 # ─── Sub-apps ─────────────────────────────────────────────────────────────────
@@ -35,34 +36,50 @@ profile_app = typer.Typer(no_args_is_help=True, help="Manage local profiles.")
 # ─── Top-level commands (registered on main app by cli.py) ───────────────────
 
 def login(
-    host: Optional[str] = typer.Option(None, "--host", help="GitLab host (e.g. https://gitlab.com)"),
-    token: Optional[str] = typer.Option(None, "--token", help="GitLab Personal Access Token (PAT)"),
+    host: Optional[str] = typer.Option(None, "--host", help="Host URL (e.g. https://gitlab.com or https://github.com)"),
+    token: Optional[str] = typer.Option(None, "--token", help="Personal Access Token"),
+    platform: Optional[str] = typer.Option(None, "--platform", help="Platform: gitlab or github (default: gitlab)"),
     profile: str = typer.Option("default", "--profile", help="Profile name (stored locally)"),
     non_interactive: bool = typer.Option(False, "--non-interactive", help="Fail instead of prompting"),
     registry_host: Optional[str] = typer.Option(
-        None, "--registry-host", help="Docker registry host (optional)"
+        None, "--registry-host", help="Docker registry host (optional, GitLab only)"
     ),
 ):
-    """Store token locally and verify via GitLab API (GET /api/v4/user)."""
+    """Store credentials locally and verify against the API."""
+    from ...config import env_fallback_platform  # noqa: F401 — used below
+
     if host is None:
         host = env_fallback_host()
     if token is None:
         token = env_fallback_token()
+    if platform is None:
+        platform = env_fallback_platform() or "gitlab"
+
+    if platform not in ("gitlab", "github"):
+        _err(f"Unknown platform '{platform}'. Supported: gitlab, github")
 
     if non_interactive:
         if not host or not token:
-            _err("Missing --host/--token (or env GITLAB_HOST/GITLAB_TOKEN) in non-interactive mode.")
+            _err(
+                "Missing --host/--token in non-interactive mode.\n"
+                "  GitLab: set GITLAB_HOST and GITLAB_TOKEN\n"
+                "  GitHub: set GITHUB_HOST (optional) and GITHUB_TOKEN"
+            )
     else:
         if not host:
-            host = typer.prompt("GitLab host", default=DEFAULT_HOST)
+            default_host = "https://gitlab.com" if platform == "gitlab" else "https://github.com"
+            host = typer.prompt(f"{platform.title()} host", default=default_host)
         if not token:
-            token = typer.prompt("GitLab token (PAT)", hide_input=True)
+            token = typer.prompt(f"{platform.title()} token (PAT)", hide_input=True)
 
     assert host is not None and token is not None
 
     try:
-        prof, user = do_login(profile_name=profile, host=host, token=token, registry_host=(registry_host or ""))
-    except (AuthError, GitLabError) as e:
+        prof, user = do_login(
+            profile_name=profile, host=host, token=token,
+            registry_host=(registry_host or ""), platform=platform,
+        )
+    except (AuthError, ProviderError) as e:
         _err(str(e))
 
     typer.secho("Login OK", fg=typer.colors.GREEN)
@@ -76,10 +93,8 @@ def whoami():
     """Show current user for the active profile (requires login)."""
     try:
         prof = load_active_profile()
-        u = gl_whoami(prof.host, prof.token)
-    except AuthError as e:
-        _err(str(e))
-    except GitLabError as e:
+        u = get_provider(prof).whoami()
+    except (AuthError, ProviderError) as e:
         _err(str(e))
 
     typer.echo(f"{u.username} ({u.name}) @ {prof.host}")
