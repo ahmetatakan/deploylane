@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import Optional
 import typer
+
+from . import __version__
 
 from .config import (
     load_config,
@@ -53,8 +56,14 @@ app.add_typer(project_app, name="gitlab", rich_help_panel="Tools")
 
 # ─── Global callback ──────────────────────────────────────────────────────────
 
-@app.callback(invoke_without_command=False)
-def _global_callback(ctx: typer.Context) -> None:
+@app.callback(invoke_without_command=True)
+def _global_callback(
+    ctx: typer.Context,
+    version: Optional[bool] = typer.Option(None, "--version", "-v", is_eager=True, help="Show version and exit."),
+) -> None:
+    if version:
+        typer.echo(f"deploylane {__version__}")
+        raise typer.Exit()
     if getattr(ctx, "resilient_parsing", False):
         return
 
