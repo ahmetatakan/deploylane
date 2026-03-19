@@ -1,3 +1,5 @@
+recursive-include deploylane/scripts *.sh
+recursive-include deploylane/templates *.sh *.yml *.conf *
 prune .deploylane
 prune .workspace
 global-exclude *.vars.yml
