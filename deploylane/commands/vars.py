@@ -9,7 +9,7 @@ from ..auth import get_provider
 from ..providers.base import ProviderError
 from ..workspace import load_workspace, project_vars_yml
 from ..ymlvars import read_vars_file, write_vars_file, demo_template, load_vars_yml, _norm_var, VarSpec, _safe_value
-from ._utils import _err, get_active_profile_or_exit
+from ._utils import _err, get_workspace_profile_or_exit
 from .workspace._utils import _resolve_ws, _ws_vars_file
 
 vars_app = typer.Typer(no_args_is_help=True, help="Manage GitLab variables for workspace projects.")
@@ -52,7 +52,7 @@ def vars_get(
     ws = load_workspace(ws_path)
     project = next(p for p in ws.projects if p.name == name)
 
-    prof = get_active_profile_or_exit()
+    prof = get_workspace_profile_or_exit(ws)
     provider = get_provider(prof)
     try:
         prj = provider.get_project(project.gitlab_project)
@@ -96,7 +96,8 @@ def vars_plan(
     if not vars_path.exists():
         _err(f"vars.yml not found: {vars_path}\nRun: dlane vars get {name}")
 
-    prof = get_active_profile_or_exit()
+    ws = load_workspace(ws_path)
+    prof = get_workspace_profile_or_exit(ws)
     provider = get_provider(prof)
     data = read_vars_file(vars_path)
     project = str(data.get("project") or "").strip()
@@ -166,7 +167,7 @@ def vars_apply(
     """Apply vars.yml into GitLab variables. Use --all for every project."""
     ws_path = _resolve_ws(file)
     ws = load_workspace(ws_path)
-    prof = get_active_profile_or_exit()
+    prof = get_workspace_profile_or_exit(ws)
     provider = get_provider(prof)
 
     if all_projects:
@@ -246,7 +247,8 @@ def vars_diff(
     if not vars_path.exists():
         _err(f"vars.yml not found: {vars_path}\nRun: dlane vars get {name}")
 
-    prof = get_active_profile_or_exit()
+    ws = load_workspace(ws_path)
+    prof = get_workspace_profile_or_exit(ws)
     provider = get_provider(prof)
     scope = str(scope or "*").strip() or "*"
 
