@@ -143,7 +143,11 @@ dlane deploy install gateway --yes    # nginx + sudoers + runs install.sh
 
 ### 7. Add the CI pipeline
 
-Copy `.workspace/gateway/.deploylane/ci/.gitlab-ci.yml` to your `acme/gateway` repo.
+```bash
+dlane ci push gateway    # opens an MR in acme/gateway with the generated .gitlab-ci.yml
+```
+
+Or copy `.workspace/gateway/.deploylane/ci/.gitlab-ci.yml` manually to your repo.
 GitLab CI will now build, push, and deploy automatically on every push.
 
 ---
@@ -202,11 +206,40 @@ Keep production secrets out of git with `.local.env` files:
 
 ```bash
 # .workspace/gateway/.deploylane/env/prod.local.env  (gitignored)
-DATABASE_URL=postgres://prod-db:5432/myapp
-STRIPE_SECRET=sk_live_...
+APP_PORT=9090     # override a port without touching the base env
+DEBUG=false       # environment-specific toggle
 ```
 
-Local env is merged on top of the base env before pushing. Safe for secrets.
+Local env is merged on top of the base env before pushing. Use this for machine-specific or temporary overrides — keep secrets and connection strings in GitLab CI variables via `vars.yml`.
+
+---
+
+## Deploy safety
+
+`deploy push` protects against accidental overwrites:
+
+- **compose** — checks server version before pushing. If server differs from local, push is blocked: `run 'dlane deploy pull' first`
+- **.env** — never overwritten if it already exists on the server (contains runtime state like `ACTIVE_COLOR`)
+- **`--force`** — bypasses compose check when you know what you're doing
+
+```bash
+dlane deploy pull gateway     # fetch compose + env + nginx from all targets
+dlane deploy push gateway --yes          # protected push
+dlane deploy push gateway --yes --force  # skip check
+dlane deploy status gateway   # show running containers and active color
+```
+
+---
+
+## Workspace profiles
+
+Each workspace can be pinned to a specific profile in `workspace.yml`:
+
+```yaml
+default_profile: prod   # always uses this profile, regardless of active global profile
+```
+
+All `vars` and `ci` commands use the workspace profile automatically. A warning is shown if it differs from the globally active profile.
 
 ---
 
@@ -259,13 +292,22 @@ Add to your `.gitignore`:
 ### Deploy
 | Command | Description |
 |---|---|
-| `dlane deploy push <name>` | Push `.env` + compose + `deploy.sh` to server |
+| `dlane deploy pull <name>` | Fetch compose, env, nginx from server (all targets) |
+| `dlane deploy push <name>` | Push compose + `deploy.sh` to server (pull-first protected) |
 | `dlane deploy install <name>` | One-time server setup (nginx + sudoers + install.sh) |
+| `dlane deploy status <name>` | Show running containers and active color per target |
 | `dlane deploy history <name>` | Show deployment history |
+
+### CI
+| Command | Description |
+|---|---|
+| `dlane ci pull <name>` | Fetch `.gitlab-ci.yml` from GitLab repo → local |
+| `dlane ci push <name>` | Push local `.gitlab-ci.yml` to GitLab via MR |
 
 ### Tools
 | Command | Description |
 |---|---|
+| `dlane --version` | Show installed version |
 | `dlane gitlab list` | Browse GitLab projects |
 
 ---
