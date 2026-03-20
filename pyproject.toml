@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deploylane"
-version = "0.3.5"
-description = "Deployment configs as code. GitLab CI variables as code. Reproducible deploys every time."
+version = "0.3.6"
+description = "Manage Docker Compose deployments and CI variables as code — GitLab & GitHub Actions"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
