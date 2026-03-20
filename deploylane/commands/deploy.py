@@ -158,10 +158,34 @@ def _push_project(
         # deploy.sh
         script_src = base / "scripts" / "deploy.sh"
         if script_src.exists():
+            if not force:
+                try:
+                    remote_sh = read_remote_file(dest, f"{remote_dir}/deploy.sh")
+                    local_sh = script_src.read_text(encoding="utf-8")
+                    if remote_sh.strip() != local_sh.strip():
+                        import difflib
+                        diff = list(difflib.unified_diff(
+                            remote_sh.splitlines(keepends=True),
+                            local_sh.splitlines(keepends=True),
+                            fromfile="server:deploy.sh",
+                            tofile="local:deploy.sh",
+                        ))
+                        typer.secho("  ⚠ Server deploy.sh differs from local:", fg=typer.colors.YELLOW)
+                        for line in diff:
+                            if line.startswith("+"):
+                                typer.secho(line, fg=typer.colors.GREEN, nl=False)
+                            elif line.startswith("-"):
+                                typer.secho(line, fg=typer.colors.RED, nl=False)
+                            else:
+                                typer.echo(line, nl=False)
+                        return False, "Server deploy.sh has changes. Run 'dlane deploy pull' first, or use --force to override.", changes
+                    changes["deploy_sh"] = "unchanged"
+                except RemoteError:
+                    pass  # not on server yet, first push
             try:
                 copy_file(script_src, dest, f"{remote_dir}/deploy.sh", dry_run=(not yes))
                 typer.echo(f"  deploy.sh → {remote_dir}/deploy.sh")
-                changes["deploy_sh"] = "pushed"
+                changes["deploy_sh"] = changes.get("deploy_sh") or "pushed"
             except Exception:
                 typer.secho("  Warning: could not push deploy.sh", fg=typer.colors.YELLOW)
                 changes["deploy_sh"] = "failed"
@@ -273,6 +297,9 @@ def _pull_target(
     if not compose_local.exists():
         compose_local = base / "compose" / "plain.yml"
     _pull_file(dest, f"{remote_dir}/docker-compose.yml", compose_local, "docker-compose.yml")
+
+    # deploy.sh
+    _pull_file(dest, f"{remote_dir}/deploy.sh", base / "scripts" / "deploy.sh", "deploy.sh")
 
     # .env
     env_local = base / "env" / f"{t_name}.env"
