@@ -92,6 +92,109 @@ def _compose_diff(remote_content: str, local_content: str) -> List[str]:
     ))
 
 
+def _print_diff(lines: List[str]) -> None:
+    for line in lines:
+        if line.startswith("+") and not line.startswith("+++"):
+            typer.secho(line, fg=typer.colors.GREEN, nl=False)
+        elif line.startswith("-") and not line.startswith("---"):
+            typer.secho(line, fg=typer.colors.RED, nl=False)
+        else:
+            typer.echo(line, nl=False)
+
+
+def _diff_project(ws_path: Path, name: str, target: str) -> bool:
+    """Compare local deploy files with server state. Returns True if any differences found."""
+    import difflib
+
+    ws_dir = ws_path.parent
+    ws = load_workspace(ws_path)
+    project = next((p for p in ws.projects if p.name == name), None)
+    if not project:
+        _err(f"Project '{name}' not found in workspace.")
+
+    deploy_yml = project_deploy_yml(project, ws_dir)
+    if not deploy_yml.exists():
+        _err(f"deploy.yml not found. Run: dlane scaffold {name}")
+
+    try:
+        spec = load_deployspec(deploy_yml)
+    except Exception as e:
+        _err(f"Invalid deploy.yml: {e}")
+
+    if target not in spec.targets:
+        _err(f"Unknown target '{target}'. Available: {', '.join(sorted(spec.targets.keys()))}")
+
+    t = spec.targets[target]
+    if not t.host:
+        _err(f"deploy.yml target '{target}': 'host' is empty.")
+
+    strategy = (getattr(t, "strategy", "plain") or "plain").strip()
+    dest = f"{t.user}@{t.host}"
+    remote_dir = t.deploy_dir
+    base = ws_dir / project.path / ".deploylane"
+
+    typer.secho(f"  {dest}:{remote_dir}", fg=typer.colors.CYAN)
+    typer.echo("")
+
+    any_diff = False
+
+    # docker-compose.yml
+    compose_src = base / "compose" / f"{strategy}.yml"
+    if not compose_src.exists():
+        compose_src = base / "compose" / "plain.yml"
+
+    if compose_src.exists():
+        remote_compose = _fetch_remote_compose(dest, remote_dir)
+        if remote_compose is None:
+            typer.secho("  docker-compose.yml  — not on server yet (will be created on push)", fg=typer.colors.YELLOW)
+            any_diff = True
+        else:
+            local_compose = compose_src.read_text(encoding="utf-8")
+            if remote_compose.strip() == local_compose.strip():
+                typer.secho("  docker-compose.yml  ✓ identical", fg=typer.colors.GREEN)
+            else:
+                typer.secho("  docker-compose.yml  ✗ differs:", fg=typer.colors.RED)
+                diff = list(difflib.unified_diff(
+                    remote_compose.splitlines(keepends=True),
+                    local_compose.splitlines(keepends=True),
+                    fromfile="server:docker-compose.yml",
+                    tofile="local:docker-compose.yml",
+                ))
+                _print_diff(diff)
+                any_diff = True
+
+    # deploy.sh
+    script_src = base / "scripts" / "deploy.sh"
+    if script_src.exists():
+        try:
+            remote_sh = read_remote_file(dest, f"{remote_dir}/deploy.sh")
+            local_sh = script_src.read_text(encoding="utf-8")
+            if remote_sh.strip() == local_sh.strip():
+                typer.secho("  deploy.sh           ✓ identical", fg=typer.colors.GREEN)
+            else:
+                typer.secho("  deploy.sh           ✗ differs:", fg=typer.colors.RED)
+                diff = list(difflib.unified_diff(
+                    remote_sh.splitlines(keepends=True),
+                    local_sh.splitlines(keepends=True),
+                    fromfile="server:deploy.sh",
+                    tofile="local:deploy.sh",
+                ))
+                _print_diff(diff)
+                any_diff = True
+        except RemoteError:
+            typer.secho("  deploy.sh           — not on server yet (will be created on push)", fg=typer.colors.YELLOW)
+            any_diff = True
+
+    # .env
+    if remote_file_exists(dest, f"{remote_dir}/.env"):
+        typer.secho("  .env                ✓ exists on server (never overwritten by push)", fg=typer.colors.GREEN)
+    else:
+        typer.secho("  .env                — not on server yet (will be created on first push)", fg=typer.colors.YELLOW)
+        any_diff = True
+
+    return any_diff
+
+
 def _push_project(
     ws_path: Path,
     name: str,
@@ -339,6 +442,34 @@ def _pull_target(
             )
 
         # sudoers requires root to read — cannot pull via SSH as deploy user
+
+
+@deploy_app.command("diff")
+def deploy_diff(
+    ctx: typer.Context,
+    name: Optional[str] = typer.Argument(None, help="Project alias"),
+    target: Optional[str] = typer.Option(None, "--target", help="Deploy target name"),
+    file: Optional[Path] = typer.Option(None, "--file", help="workspace.yml path"),
+) -> None:
+    """Show what would change on the server without pushing anything."""
+    if not name:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+
+    ws_path = _resolve_ws(file)
+    resolved_target = _resolve_target(name, target, ws_path)
+
+    typer.secho(f"▶ DEPLOY DIFF [{name}]  target={resolved_target}", fg=typer.colors.CYAN, bold=True)
+    typer.echo("")
+
+    any_diff = _diff_project(ws_path, name, resolved_target)
+
+    typer.echo("")
+    if any_diff:
+        typer.secho("  → Run 'dlane deploy push' to apply changes.", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+    else:
+        typer.secho("  Server is up to date.", fg=typer.colors.GREEN)
 
 
 @deploy_app.command("pull")

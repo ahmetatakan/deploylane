@@ -16,6 +16,7 @@ from ..gitlab import (
     upsert_repository_file,
     create_merge_request,
     get_project_by_path,
+    lint_ci_file,
 )
 from ._utils import _err, get_workspace_profile_or_exit
 from .workspace._utils import _resolve_ws
@@ -53,6 +54,51 @@ def _show_diff(remote: str, local: str) -> bool:
             typer.echo(line, nl=False)
     typer.echo("")
     return True
+
+
+@ci_app.command("lint")
+def ci_lint(
+    ctx: typer.Context,
+    name: Optional[str] = typer.Argument(None, help="Project alias"),
+    ref: str = typer.Option("main", "--ref", help="Branch ref for lint context"),
+    file: Optional[Path] = typer.Option(None, "--file", help="workspace.yml path"),
+) -> None:
+    """Validate local .gitlab-ci.yml against GitLab's CI lint API."""
+    if not name:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+
+    ws_path = _resolve_ws(file)
+    ws = load_workspace(ws_path)
+    project = next((p for p in ws.projects if p.name == name), None)
+    if not project:
+        _err(f"Project '{name}' not found in workspace.")
+
+    local_ci = _local_ci(ws_path, name)
+    if not local_ci.exists():
+        _err(f"Local .gitlab-ci.yml not found: {local_ci}\n  Run: dlane scaffold {name}")
+
+    content = local_ci.read_text(encoding="utf-8")
+    prof = get_workspace_profile_or_exit(ws)
+
+    typer.secho(f"[{name}] Linting .gitlab-ci.yml via GitLab API...", fg=typer.colors.CYAN)
+
+    try:
+        gl_project = get_project_by_path(prof.host, prof.token, project.gitlab_project)
+        valid, messages = lint_ci_file(prof.host, prof.token, int(gl_project.id), content, ref=ref)
+    except GitLabError as e:
+        _err(str(e))
+
+    if valid:
+        typer.secho("  ✓ Valid", fg=typer.colors.GREEN, bold=True)
+        if messages:
+            for m in messages:
+                typer.secho(f"  {m}", fg=typer.colors.YELLOW)
+    else:
+        typer.secho("  ✗ Invalid:", fg=typer.colors.RED, bold=True)
+        for m in messages:
+            typer.secho(f"  - {m}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
 
 
 @ci_app.command("pull")
@@ -135,6 +181,23 @@ def ci_push(
         default_branch = gl_project.default_branch or ref
     except GitLabError as e:
         _err(str(e))
+
+    # Lint check before push
+    typer.secho("  Linting .gitlab-ci.yml...", fg=typer.colors.CYAN)
+    try:
+        valid, messages = lint_ci_file(prof.host, prof.token, int(gl_project.id), local_content, ref=default_branch)
+    except GitLabError:
+        valid, messages = True, []  # lint API unavailable — proceed
+
+    if not valid:
+        typer.secho("  ✗ Lint failed — fix errors before pushing:", fg=typer.colors.RED, bold=True)
+        for m in messages:
+            typer.secho(f"    - {m}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    typer.secho("  ✓ Lint passed", fg=typer.colors.GREEN)
+    for m in messages:
+        typer.secho(f"  {m}", fg=typer.colors.YELLOW)
 
     # Pull check
     if not force:

@@ -426,6 +426,38 @@ def create_merge_request(
     raise GitLabError(f"Failed to create MR (HTTP {r.status_code}): {r.text}")
 
 
+def lint_ci_file(
+    host: str,
+    token: str,
+    project_id: int,
+    content: str,
+    ref: str = "main",
+    timeout_s: int = 20,
+) -> tuple[bool, list[str]]:
+    """POST /projects/:id/ci/lint — validate .gitlab-ci.yml content.
+
+    Returns (valid, errors) where errors is a list of error strings.
+    """
+    url = _url(host, f"/projects/{project_id}/ci/lint")
+    payload = {"content": content, "ref": ref, "dry_run": False}
+    try:
+        r = requests.post(url, headers=_headers(token), json=payload, timeout=timeout_s)
+    except requests.RequestException as e:
+        raise _unreachable_error(host, e) from e
+    if r.status_code == 401:
+        raise _auth_error(host)
+    if r.status_code == 403:
+        raise _scope_error(host)
+    if r.status_code not in (200, 201):
+        raise GitLabError(f"CI lint API error (HTTP {r.status_code}).")
+
+    data = r.json()
+    valid = bool(data.get("valid", False))
+    errors: list[str] = data.get("errors") or []
+    warnings: list[str] = data.get("warnings") or []
+    return valid, errors + [f"warning: {w}" for w in warnings]
+
+
 def delete_project_variable(
     host: str,
     token: str,
