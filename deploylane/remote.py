@@ -32,15 +32,55 @@ def require_tools(*tools: str) -> None:
         raise RemoteError(f"Missing required tools: {', '.join(missing)}")
 
 
+def _parse_ssh_error(dest: str, stderr: str, returncode: int) -> str:
+    """Convert raw SSH stderr into an actionable error message."""
+    s = (stderr or "").lower()
+    host = dest.split("@")[-1] if "@" in dest else dest
+
+    if "connection refused" in s:
+        return (
+            f"Connection refused to {host}\n"
+            f"  Is the server running and SSH on port 22?\n"
+            f"  Try: ssh {dest}"
+        )
+    if "no route to host" in s or "network is unreachable" in s:
+        return (
+            f"Cannot reach {host}\n"
+            f"  Check the host IP in deploy.yml and your network connection.\n"
+            f"  Try: ping {host}"
+        )
+    if "could not resolve hostname" in s or "name or service not known" in s:
+        return (
+            f"Cannot resolve hostname '{host}'\n"
+            f"  Check the host in deploy.yml — use an IP address if DNS fails."
+        )
+    if "permission denied" in s or "publickey" in s:
+        return (
+            f"SSH authentication failed for {dest}\n"
+            f"  Check your SSH key is in the server's ~/.ssh/authorized_keys.\n"
+            f"  Try: ssh {dest}"
+        )
+    if "host key verification failed" in s:
+        return (
+            f"SSH host key verification failed for {host}\n"
+            f"  If the server was reinstalled, run: ssh-keygen -R {host}\n"
+            f"  Then reconnect: ssh {dest}"
+        )
+    if stderr.strip():
+        return f"SSH error connecting to {host}: {stderr.strip()}"
+    return f"SSH command failed (exit {returncode}) on {host}"
+
+
 def run_cmd(argv: List[str], dry_run: bool = True) -> None:
-    # deterministic print
     print("+ " + " ".join(argv))
     if dry_run:
         return
-    try:
-        subprocess.run(argv, check=True)
-    except subprocess.CalledProcessError as e:
-        raise RemoteError(f"Command failed: {argv}\n{e}") from e
+    result = subprocess.run(argv, capture_output=True, text=True)
+    if result.returncode != 0:
+        dest = next((a for a in argv if "@" in a), "")
+        if dest and argv[0] in ("ssh", "scp"):
+            raise RemoteError(_parse_ssh_error(dest, result.stderr, result.returncode))
+        raise RemoteError(result.stderr.strip() or f"Command failed (exit {result.returncode})")
 
 
 def ssh_mkdir(dest: str, remote_path: str, dry_run: bool = True) -> None:
@@ -152,5 +192,8 @@ def read_remote_file(dest: str, remote_path: str) -> str:
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        raise RemoteError(f"Could not read remote file: {remote_path}")
+        stderr = result.stderr.strip()
+        if "no such file" in stderr.lower() or result.returncode == 1:
+            raise RemoteError(f"File not found on server: {remote_path}")
+        raise RemoteError(_parse_ssh_error(dest, stderr, result.returncode))
     return result.stdout

@@ -122,6 +122,24 @@ def _push_project(
             return False, f"Unknown target '{target}'. Available: {', '.join(sorted(spec.targets.keys()))}", changes
 
         t = spec.targets[target]
+
+        if not t.host:
+            return False, (
+                f"deploy.yml target '{target}': 'host' is empty.\n"
+                f"  Edit: {deploy_yml}\n"
+                f"  Set the server IP or hostname under targets.{target}.host"
+            ), changes
+        if not t.user:
+            return False, (
+                f"deploy.yml target '{target}': 'user' is empty.\n"
+                f"  Edit: {deploy_yml}"
+            ), changes
+        if not t.deploy_dir:
+            return False, (
+                f"deploy.yml target '{target}': 'deploy_dir' is empty.\n"
+                f"  Edit: {deploy_yml}"
+            ), changes
+
         strategy = (getattr(t, "strategy", "plain") or "plain").strip()
         dest = f"{t.user}@{t.host}"
         remote_dir = t.deploy_dir
@@ -186,8 +204,8 @@ def _push_project(
                 copy_file(script_src, dest, f"{remote_dir}/deploy.sh", dry_run=(not yes))
                 typer.echo(f"  deploy.sh → {remote_dir}/deploy.sh")
                 changes["deploy_sh"] = changes.get("deploy_sh") or "pushed"
-            except Exception:
-                typer.secho("  Warning: could not push deploy.sh", fg=typer.colors.YELLOW)
+            except Exception as e:
+                typer.secho(f"  Warning: could not push deploy.sh: {e}", fg=typer.colors.YELLOW)
                 changes["deploy_sh"] = "failed"
 
         # docker-compose.yml
@@ -217,8 +235,8 @@ def _push_project(
                 copy_file(compose_src, dest, f"{remote_dir}/docker-compose.yml", dry_run=(not yes))
                 typer.echo(f"  .deploylane/compose/{strategy}.yml → {remote_dir}/docker-compose.yml")
                 changes["compose"] = changes.get("compose") or "pushed"
-            except Exception:
-                typer.secho("  Warning: could not push docker-compose.yml", fg=typer.colors.YELLOW)
+            except Exception as e:
+                typer.secho(f"  Warning: could not push docker-compose.yml: {e}", fg=typer.colors.YELLOW)
                 changes["compose"] = "failed"
 
     except Exception as e:
