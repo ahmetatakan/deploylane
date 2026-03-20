@@ -329,6 +329,7 @@ Add to your `.gitignore`:
 ### Deploy
 | Command | Description |
 |---|---|
+| `dlane deploy diff <name>` | Show what would change on the server without pushing |
 | `dlane deploy pull <name>` | Fetch compose, deploy.sh, env, nginx from server (all targets) |
 | `dlane deploy push <name>` | Push compose + `deploy.sh` to server (pull-first protected, never overwrites `.env`) |
 | `dlane deploy install <name>` | One-time server setup (nginx + sudoers + install.sh) |
@@ -338,8 +339,9 @@ Add to your `.gitignore`:
 ### CI
 | Command | Description |
 |---|---|
+| `dlane ci lint <name>` | Validate local `.gitlab-ci.yml` via GitLab lint API |
 | `dlane ci pull <name>` | Fetch `.gitlab-ci.yml` from GitLab repo → local |
-| `dlane ci push <name>` | Push local `.gitlab-ci.yml` to GitLab via MR |
+| `dlane ci push <name>` | Lint + push local `.gitlab-ci.yml` to GitLab via MR |
 
 ### Tools
 | Command | Description |
