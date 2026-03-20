@@ -44,21 +44,34 @@ DeployLane makes the entire deployment setup **version-controlled and reproducib
 ```
 Your workstation                  GitLab CI                  Server
 ────────────────                  ─────────────              ──────
-dlane scaffold                                           .env
-  deploy.yml     → dlane deploy push →                  docker-compose.yml
-  vars.yml                                               deploy.sh
-  compose/       → dlane deploy install →               nginx.conf
-  nginx/                                                 install.sh (run once)
+dlane scaffold
+  deploy.yml
+  vars.yml       → dlane vars apply  → GitLab CI variables ← Pipeline uses these
+  compose/                                                        ↓
+  nginx/                                                    deploy.sh (CI calls this)
+  ci/
 
-dlane vars apply → GitLab CI variables ← Pipeline uses these
-                                              ↓
-                                          deploy.sh (zero-downtime or restart)
+                 ← dlane deploy pull ←  docker-compose.yml  (pull before you push)
+                                        deploy.sh
+                                        .env (runtime state, never overwritten)
+                                        nginx.conf
+
+                 → dlane deploy push →  docker-compose.yml  (pull-first protected)
+                                        deploy.sh
+
+                 → dlane deploy install → nginx.conf         (one-time setup)
+                                          sudoers
+                                          install.sh
+
+dlane ci push   → opens MR in GitLab with .gitlab-ci.yml
+dlane deploy status  → shows running containers and active color per target
 ```
 
 1. **`dlane scaffold`** generates all server-side files from a single `deploy.yml`
 2. **`dlane vars apply`** pushes your local `vars.yml` to GitLab CI variables
-3. **`dlane deploy push`** syncs configs to the server
-4. **GitLab CI** builds the image and calls `deploy.sh` — that's it
+3. **`dlane deploy pull`** fetches the current server state before making changes
+4. **`dlane deploy push`** syncs `docker-compose.yml` and `deploy.sh` to the server (blocked if server version differs)
+5. **GitLab CI** builds the image and calls `deploy.sh` — that's it
 
 ---
 
@@ -137,8 +150,9 @@ dlane vars apply gateway    # push to GitLab
 ### 6. Push files to server & install (once per server)
 
 ```bash
-dlane deploy push gateway --yes       # .env + docker-compose.yml + deploy.sh
-dlane deploy install gateway --yes    # nginx + sudoers + runs install.sh
+dlane deploy pull gateway             # fetch server state first (if server already exists)
+dlane deploy push gateway --yes       # docker-compose.yml + deploy.sh (pull-first protected)
+dlane deploy install gateway --yes    # nginx + sudoers + runs install.sh (one-time)
 ```
 
 ### 7. Add the CI pipeline
@@ -219,14 +233,15 @@ Local env is merged on top of the base env before pushing. Use this for machine-
 `deploy push` protects against accidental overwrites:
 
 - **compose** — checks server version before pushing. If server differs from local, push is blocked: `run 'dlane deploy pull' first`
+- **deploy.sh** — same pull-first check: blocked if server version differs from local
 - **.env** — never overwritten if it already exists on the server (contains runtime state like `ACTIVE_COLOR`)
-- **`--force`** — bypasses compose check when you know what you're doing
+- **`--force`** — bypasses compose and deploy.sh checks when you know what you're doing
 
 ```bash
-dlane deploy pull gateway     # fetch compose + env + nginx from all targets
-dlane deploy push gateway --yes          # protected push
-dlane deploy push gateway --yes --force  # skip check
-dlane deploy status gateway   # show running containers and active color
+dlane deploy pull gateway                # fetch compose + deploy.sh + env + nginx from all targets
+dlane deploy push gateway --yes          # protected push (blocked if server differs)
+dlane deploy push gateway --yes --force  # skip version checks
+dlane deploy status gateway              # show running containers and active color
 ```
 
 ---
@@ -247,9 +262,11 @@ All `vars` and `ci` commands use the workspace profile automatically. A warning 
 
 - GitLab token stored at `~/.config/deploylane/config.toml` with `0600` permissions
 - Masked variables shown as `<masked>` in all output
-- `deploy push` is **dry-run by default** — requires explicit `--yes`
+- `deploy push` requires explicit `--yes` to apply changes
+- `deploy push` is **blocked by default** if server state differs from local — run `deploy pull` first
 - `deploy install` requires explicit `--yes` and prompts for sudo password interactively
 - `.local.env` files are gitignored automatically
+- `.env` on the server is **never overwritten** — it holds runtime state (`ACTIVE_COLOR`, etc.)
 
 Add to your `.gitignore`:
 ```
@@ -292,8 +309,8 @@ Add to your `.gitignore`:
 ### Deploy
 | Command | Description |
 |---|---|
-| `dlane deploy pull <name>` | Fetch compose, env, nginx from server (all targets) |
-| `dlane deploy push <name>` | Push compose + `deploy.sh` to server (pull-first protected) |
+| `dlane deploy pull <name>` | Fetch compose, deploy.sh, env, nginx from server (all targets) |
+| `dlane deploy push <name>` | Push compose + `deploy.sh` to server (pull-first protected, never overwrites `.env`) |
 | `dlane deploy install <name>` | One-time server setup (nginx + sudoers + install.sh) |
 | `dlane deploy status <name>` | Show running containers and active color per target |
 | `dlane deploy history <name>` | Show deployment history |
