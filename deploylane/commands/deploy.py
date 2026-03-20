@@ -7,8 +7,8 @@ from typing import Dict, List, Optional, Tuple
 import typer
 
 from ..deployspec import load_deployspec
-from ..deploylog import read_log
-from ..remote import copy_file, RemoteError, ssh_run_interactive
+from ..deploylog import read_log, append_log, make_entry
+from ..remote import copy_file, RemoteError, ssh_run_interactive, read_remote_file, remote_file_exists, ssh_capture
 from ..workspace import load_workspace, project_deploy_yml
 from ._utils import _err
 from .workspace._utils import _resolve_ws
@@ -74,32 +74,52 @@ def _merged_env_file(base_env: Path, local_env: Path) -> Path:
     return tmp
 
 
+def _fetch_remote_compose(dest: str, remote_dir: str) -> Optional[str]:
+    """Fetch remote docker-compose.yml. Returns None if not present."""
+    try:
+        return read_remote_file(dest, f"{remote_dir}/docker-compose.yml")
+    except RemoteError:
+        return None
+
+
+def _compose_diff(remote_content: str, local_content: str) -> List[str]:
+    import difflib
+    return list(difflib.unified_diff(
+        remote_content.splitlines(keepends=True),
+        local_content.splitlines(keepends=True),
+        fromfile="server:docker-compose.yml",
+        tofile="local:docker-compose.yml",
+    ))
+
+
 def _push_project(
     ws_path: Path,
     name: str,
     target: str,
     yes: bool,
-) -> Tuple[bool, str]:
-    """Push .env + compose + deploy.sh to server. Deploy is handled by CI pipeline."""
+    force: bool = False,
+) -> Tuple[bool, str, Dict]:
+    """Push .env + compose + deploy.sh to server. Returns (ok, error, changes)."""
     ws_dir = ws_path.parent
+    changes: Dict[str, str] = {}
 
     try:
         ws = load_workspace(ws_path)
         project = next((p for p in ws.projects if p.name == name), None)
         if not project:
-            return False, f"Project '{name}' not found in workspace."
+            return False, f"Project '{name}' not found in workspace.", changes
 
         deploy_yml = project_deploy_yml(project, ws_dir)
         if not deploy_yml.exists():
-            return False, f"deploy.yml not found: {deploy_yml}\nRun: dlane scaffold {name}"
+            return False, f"deploy.yml not found: {deploy_yml}\nRun: dlane scaffold {name}", changes
 
         try:
             spec = load_deployspec(deploy_yml)
         except Exception as e:
-            return False, f"Invalid deploy.yml: {e}"
+            return False, f"Invalid deploy.yml: {e}", changes
 
         if target not in spec.targets:
-            return False, f"Unknown target '{target}'. Available: {', '.join(sorted(spec.targets.keys()))}"
+            return False, f"Unknown target '{target}'. Available: {', '.join(sorted(spec.targets.keys()))}", changes
 
         t = spec.targets[target]
         strategy = (getattr(t, "strategy", "plain") or "plain").strip()
@@ -109,26 +129,31 @@ def _push_project(
 
         typer.echo(f"  {'(dry run) ' if not yes else ''}{dest}:{remote_dir}")
 
-        # .env  (merged with .local.env if present)
+        # .env
         env_src = base / "env" / f"{target}.env"
         local_env = base / "env" / f"{target}.local.env"
         if not env_src.exists():
-            return False, f".env template not found: {env_src}\nRun: dlane scaffold {name}"
-        tmp_env = None
-        try:
-            if local_env.exists():
-                tmp_env = _merged_env_file(env_src, local_env)
-                push_src = tmp_env
-                typer.echo(f"  .deploylane/env/{target}.env + {target}.local.env → {remote_dir}/.env")
-            else:
-                push_src = env_src
-                typer.echo(f"  .deploylane/env/{target}.env → {remote_dir}/.env")
-            copy_file(push_src, dest, f"{remote_dir}/.env", dry_run=(not yes))
-        except (RemoteError, Exception) as e:
-            return False, f"Push .env failed: {e}"
-        finally:
-            if tmp_env and tmp_env.exists():
-                tmp_env.unlink()
+            return False, f".env template not found: {env_src}\nRun: dlane scaffold {name}", changes
+        if remote_file_exists(dest, f"{remote_dir}/.env"):
+            typer.secho(f"  .env already exists on server — skipped (pull to inspect)", fg=typer.colors.YELLOW)
+            changes["env"] = "skipped"
+        else:
+            tmp_env = None
+            try:
+                if local_env.exists():
+                    tmp_env = _merged_env_file(env_src, local_env)
+                    push_src = tmp_env
+                    typer.echo(f"  .deploylane/env/{target}.env + {target}.local.env → {remote_dir}/.env")
+                else:
+                    push_src = env_src
+                    typer.echo(f"  .deploylane/env/{target}.env → {remote_dir}/.env")
+                copy_file(push_src, dest, f"{remote_dir}/.env", dry_run=(not yes))
+                changes["env"] = "pushed"
+            except (RemoteError, Exception) as e:
+                return False, f"Push .env failed: {e}", changes
+            finally:
+                if tmp_env and tmp_env.exists():
+                    tmp_env.unlink()
 
         # deploy.sh
         script_src = base / "scripts" / "deploy.sh"
@@ -136,28 +161,181 @@ def _push_project(
             try:
                 copy_file(script_src, dest, f"{remote_dir}/deploy.sh", dry_run=(not yes))
                 typer.echo(f"  deploy.sh → {remote_dir}/deploy.sh")
+                changes["deploy_sh"] = "pushed"
             except Exception:
                 typer.secho("  Warning: could not push deploy.sh", fg=typer.colors.YELLOW)
+                changes["deploy_sh"] = "failed"
 
         # docker-compose.yml
         compose_src = base / "compose" / f"{strategy}.yml"
         if not compose_src.exists():
             compose_src = base / "compose" / "plain.yml"
         if compose_src.exists():
+            if not force:
+                remote_compose = _fetch_remote_compose(dest, remote_dir)
+                if remote_compose is not None:
+                    local_compose = compose_src.read_text(encoding="utf-8")
+                    if remote_compose.strip() != local_compose.strip():
+                        diff = _compose_diff(remote_compose, local_compose)
+                        typer.secho("  ⚠ Server compose differs from local:", fg=typer.colors.YELLOW)
+                        for line in diff:
+                            if line.startswith("+"):
+                                typer.secho(line, fg=typer.colors.GREEN, nl=False)
+                            elif line.startswith("-"):
+                                typer.secho(line, fg=typer.colors.RED, nl=False)
+                            else:
+                                typer.echo(line, nl=False)
+                        return False, "Server has uncommitted changes. Run 'dlane deploy pull' first, or use --force to override.", changes
+                    changes["compose"] = "unchanged"
+                else:
+                    changes["compose"] = "pushed"
             try:
                 copy_file(compose_src, dest, f"{remote_dir}/docker-compose.yml", dry_run=(not yes))
                 typer.echo(f"  .deploylane/compose/{strategy}.yml → {remote_dir}/docker-compose.yml")
+                changes["compose"] = changes.get("compose") or "pushed"
             except Exception:
                 typer.secho("  Warning: could not push docker-compose.yml", fg=typer.colors.YELLOW)
+                changes["compose"] = "failed"
 
     except Exception as e:
-        return False, str(e)
+        return False, str(e), changes
 
-    return True, ""
+    return True, "", changes
 
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
+
+
+def _pull_file(dest: str, remote_path: str, local_path: Path, label: str) -> None:
+    """Pull a single file from server. Shows diff and asks confirmation if different."""
+    import difflib
+    try:
+        remote_content = read_remote_file(dest, remote_path)
+    except RemoteError:
+        typer.secho(f"    {label}: not found on server — skipped", fg=typer.colors.YELLOW)
+        return
+
+    if not local_path.exists():
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_text(remote_content, encoding="utf-8")
+        typer.secho(f"    {label}: created", fg=typer.colors.GREEN)
+        return
+
+    local_content = local_path.read_text(encoding="utf-8")
+    if remote_content.strip() == local_content.strip():
+        typer.secho(f"    {label}: up to date", fg=typer.colors.GREEN)
+        return
+
+    diff = list(difflib.unified_diff(
+        remote_content.splitlines(keepends=True),
+        local_content.splitlines(keepends=True),
+        fromfile=f"server:{label}",
+        tofile=f"local:{label}",
+    ))
+    typer.secho(f"    {label}: diff (server → local):", fg=typer.colors.YELLOW)
+    for line in diff:
+        if line.startswith("+"):
+            typer.secho(line, fg=typer.colors.GREEN, nl=False)
+        elif line.startswith("-"):
+            typer.secho(line, fg=typer.colors.RED, nl=False)
+        else:
+            typer.echo(line, nl=False)
+    typer.echo("")
+    typer.confirm(f"    Overwrite local {label}?", abort=True)
+    local_path.write_text(remote_content, encoding="utf-8")
+    typer.secho(f"    {label}: updated", fg=typer.colors.GREEN)
+
+
+def _pull_target(
+    name: str,
+    t_name: str,
+    t_raw: dict,
+    strategy_top: str,
+    base: Path,
+    app_name: str,
+) -> None:
+    """Pull compose, .env and nginx configs from a single target's server."""
+    host = str(t_raw.get("host") or "").strip()
+    user = str(t_raw.get("user") or "deploy").strip()
+    remote_dir = str(t_raw.get("deploy_dir") or "").strip()
+    strategy = str(t_raw.get("strategy") or strategy_top).strip()
+
+    if not host or not remote_dir:
+        typer.secho(f"  [{t_name}] Skipped — missing host or deploy_dir", fg=typer.colors.YELLOW)
+        return
+
+    dest = f"{user}@{host}"
+    typer.secho(f"  [{t_name}] Pulling from {dest}:{remote_dir}", fg=typer.colors.CYAN)
+
+    # compose
+    compose_local = base / "compose" / f"{strategy}.yml"
+    if not compose_local.exists():
+        compose_local = base / "compose" / "plain.yml"
+    _pull_file(dest, f"{remote_dir}/docker-compose.yml", compose_local, "docker-compose.yml")
+
+    # .env
+    env_local = base / "env" / f"{t_name}.env"
+    _pull_file(dest, f"{remote_dir}/.env", env_local, f"{t_name}.env")
+
+    # nginx + sudoers (bluegreen only) — files live in system dirs after install
+    if strategy == "bluegreen":
+        nginx_pulls = [
+            (f"{app_name}-upstream-blue.conf",  "/etc/nginx/snippets"),
+            (f"{app_name}-upstream-green.conf", "/etc/nginx/snippets"),
+            (f"00-{app_name}-upstream.conf",    "/etc/nginx/sites-available"),
+        ]
+        for fname, nginx_dir in nginx_pulls:
+            _pull_file(
+                dest,
+                f"{nginx_dir}/{fname}",
+                base / "nginx" / fname,
+                f"nginx/{fname}",
+            )
+
+        # sudoers requires root to read — cannot pull via SSH as deploy user
+
+
+@deploy_app.command("pull")
+def deploy_pull(
+    ctx: typer.Context,
+    name: Optional[str] = typer.Argument(None, help="Project alias"),
+    target: Optional[str] = typer.Option(None, "--target", help="Pull specific target only"),
+    file: Optional[Path] = typer.Option(None, "--file", help="workspace.yml path"),
+) -> None:
+    """Fetch docker-compose.yml from all target servers and update local copies."""
+    if not name:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+
+    ws_path = _resolve_ws(file)
+    project = _load_project(name, ws_path)
+    ws_dir = ws_path.parent
+
+    deploy_yml = project_deploy_yml(project, ws_dir)
+    if not deploy_yml.exists():
+        _err(f"deploy.yml not found. Run: dlane scaffold {name}")
+
+    import yaml as _yaml
+    raw = _yaml.safe_load(deploy_yml.read_text(encoding="utf-8")) or {}
+    targets_raw = raw.get("targets") or {}
+    strategy_top = str(raw.get("strategy") or "plain").strip()
+    app_name = name.replace("-", "_")
+    base = ws_dir / project.path / ".deploylane"
+
+    typer.secho(f"[{name}] Pull", fg=typer.colors.CYAN, bold=True)
+
+    if target:
+        t_raw = targets_raw.get(target)
+        if not t_raw:
+            _err(f"Target '{target}' not found in deploy.yml.")
+        _pull_target(name, target, t_raw, strategy_top, base, app_name)
+    else:
+        for t_name, t_raw in targets_raw.items():
+            if isinstance(t_raw, dict):
+                _pull_target(name, t_name, t_raw, strategy_top, base, app_name)
+
+    typer.secho(f"[{name}] Pull done.", fg=typer.colors.GREEN)
 
 
 @deploy_app.command("push")
@@ -166,6 +344,7 @@ def deploy_push(
     name: Optional[str] = typer.Argument(None, help="Project alias (omit with --all or --tag)"),
     target: Optional[str] = typer.Option(None, "--target", help="Deploy target name"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Actually push (default: dry run)"),
+    force: bool = typer.Option(False, "--force", help="Skip server compose check and push anyway"),
     all_projects: bool = typer.Option(False, "--all", help="Push all projects in workspace"),
     tag: Optional[str] = typer.Option(None, "--tag", help="Push all projects with this workspace tag"),
     file: Optional[Path] = typer.Option(None, "--file", help="workspace.yml path"),
@@ -188,10 +367,29 @@ def deploy_push(
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
 
+    def _log_push(project_name: str, resolved_target: str, ok: bool, err: str, changes: Dict) -> None:
+        if yes:  # only log actual pushes, not dry-runs
+            ws = load_workspace(ws_path)
+            proj = next((p for p in ws.projects if p.name == project_name), None)
+            entry = make_entry(
+                project=project_name,
+                gitlab_project=proj.gitlab_project if proj else "",
+                target=resolved_target,
+                image_tag="",
+                strategy="",
+                host="",
+                deploy_dir="",
+                status="ok" if ok else "failed",
+                error=err,
+            )
+            entry["changes"] = changes
+            append_log(ws_path, entry)
+
     if len(names) == 1:
         resolved_target = _resolve_target(names[0], target, ws_path)
         typer.secho(f"[{names[0]}] Push {'(dry run)' if not yes else ''} → target={resolved_target}", fg=typer.colors.CYAN)
-        ok, err = _push_project(ws_path, names[0], resolved_target, yes)
+        ok, err, changes = _push_project(ws_path, names[0], resolved_target, yes, force=force)
+        _log_push(names[0], resolved_target, ok, err, changes)
         if ok:
             typer.secho(f"[{names[0]}] Push OK", fg=typer.colors.GREEN)
         else:
@@ -206,7 +404,8 @@ def deploy_push(
     for project_name in names:
         resolved_target = _resolve_target(project_name, target, ws_path)
         typer.secho(f"── {project_name}  target={resolved_target} ──────────────────────────", bold=True)
-        ok, err = _push_project(ws_path, project_name, resolved_target, yes)
+        ok, err, changes = _push_project(ws_path, project_name, resolved_target, yes, force=force)
+        _log_push(project_name, resolved_target, ok, err, changes)
         results.append((project_name, ok, err))
         typer.secho(f"  {'✓ OK' if ok else f'✗ {err}'}", fg=typer.colors.GREEN if ok else typer.colors.RED)
         typer.echo("")
@@ -309,6 +508,99 @@ def deploy_install(
     typer.secho(f"[{name}] Install OK", fg=typer.colors.GREEN)
 
 
+def _parse_remote_env(dest: str, remote_dir: str) -> Dict[str, str]:
+    """Read and parse .env from server into a dict."""
+    try:
+        content = read_remote_file(dest, f"{remote_dir}/.env")
+    except RemoteError:
+        return {}
+    result: Dict[str, str] = {}
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        result[k.strip()] = v.strip()
+    return result
+
+
+def _compose_service_running(dest: str, remote_dir: str, service_name: str) -> bool:
+    """Check if a docker compose service is running."""
+    try:
+        out = ssh_capture(dest, f"cd {remote_dir} && docker compose ps --status running --services 2>/dev/null")
+        return service_name in out.splitlines()
+    except RemoteError:
+        return False
+
+
+@deploy_app.command("status")
+def deploy_status(
+    ctx: typer.Context,
+    name: Optional[str] = typer.Argument(None, help="Project alias"),
+    file: Optional[Path] = typer.Option(None, "--file", help="workspace.yml path"),
+) -> None:
+    """Show running container status for all targets of a project."""
+    if not name:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+
+    ws_path = _resolve_ws(file)
+    project = _load_project(name, ws_path)
+    ws_dir = ws_path.parent
+
+    deploy_yml = project_deploy_yml(project, ws_dir)
+    if not deploy_yml.exists():
+        _err(f"deploy.yml not found. Run: dlane scaffold {name}")
+
+    import yaml as _yaml
+    raw = _yaml.safe_load(deploy_yml.read_text(encoding="utf-8")) or {}
+    targets_raw = raw.get("targets") or {}
+    strategy_top = str(raw.get("strategy") or "plain").strip()
+    app_name = name.replace("-", "_")
+    tag_key = app_name.upper() + "_TAG"
+
+    typer.secho(f"[{name}] Status", fg=typer.colors.CYAN, bold=True)
+    typer.echo("")
+
+    for t_name, t_raw in targets_raw.items():
+        if not isinstance(t_raw, dict):
+            continue
+
+        host = str(t_raw.get("host") or "").strip()
+        user = str(t_raw.get("user") or "deploy").strip()
+        remote_dir = str(t_raw.get("deploy_dir") or "").strip()
+        strategy = str(t_raw.get("strategy") or strategy_top).strip()
+
+        if not host or not remote_dir:
+            typer.secho(f"  [{t_name}] Skipped — missing host or deploy_dir", fg=typer.colors.YELLOW)
+            continue
+
+        dest = f"{user}@{host}"
+        typer.secho(f"  [{t_name}] {host}", bold=True)
+
+        env = _parse_remote_env(dest, remote_dir)
+
+        if strategy == "bluegreen":
+            active_color = env.get("ACTIVE_COLOR", "?")
+            tag_blue  = env.get(f"{tag_key}_BLUE", "—")
+            tag_green = env.get(f"{tag_key}_GREEN", "—")
+
+            for color, tag in [("blue", tag_blue), ("green", tag_green)]:
+                service = f"{app_name}_{color}"
+                running = _compose_service_running(dest, remote_dir, service)
+                is_active = color == active_color
+                status_icon = typer.style("✓ running", fg=typer.colors.GREEN) if running else typer.style("✗ stopped", fg=typer.colors.RED)
+                active_label = typer.style(" ← active", fg=typer.colors.CYAN) if is_active else ""
+                typer.echo(f"    {color:<6} {status_icon}  {tag}{active_label}")
+        else:
+            tag = env.get(tag_key, "—")
+            running = _compose_service_running(dest, remote_dir, app_name)
+            status_icon = typer.style("✓ running", fg=typer.colors.GREEN) if running else typer.style("✗ stopped", fg=typer.colors.RED)
+            typer.echo(f"    {status_icon}  {tag}")
+
+        typer.echo("")
+
+
 @deploy_app.command("history")
 def deploy_history(
     ctx: typer.Context,
@@ -366,5 +658,9 @@ def deploy_history(
             + f"{e.get('strategy',''):<{w_strat}}" + SEP
             + status_styled
         )
+        changes = e.get("changes") or {}
+        if changes:
+            parts = [f"{k}:{v}" for k, v in changes.items()]
+            typer.secho(f"    └ {', '.join(parts)}", fg=typer.colors.BRIGHT_BLACK)
 
     typer.echo("")

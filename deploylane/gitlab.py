@@ -310,6 +310,122 @@ def set_project_variable(
     raise GitLabError(f"Failed to create variable '{key_norm}' (HTTP {r.status_code}).")
 
 
+def get_repository_file(
+    host: str,
+    token: str,
+    project_id: int,
+    file_path: str,
+    ref: str = "main",
+    timeout_s: int = 20,
+) -> str:
+    """GET /projects/:id/repository/files/:file_path — returns decoded content."""
+    import base64
+    enc = quote(file_path, safe="")
+    url = _url(host, f"/projects/{project_id}/repository/files/{enc}")
+    try:
+        r = requests.get(url, headers=_headers(token), params={"ref": ref}, timeout=timeout_s)
+    except requests.RequestException as e:
+        raise _unreachable_error(host, e) from e
+    if r.status_code == 401:
+        raise _auth_error(host)
+    if r.status_code == 404:
+        raise GitLabError(f"File not found: {file_path} (ref={ref})")
+    if r.status_code != 200:
+        raise GitLabError(f"Unexpected response (HTTP {r.status_code}).")
+    data = r.json()
+    return base64.b64decode(data["content"]).decode("utf-8")
+
+
+def create_branch(
+    host: str,
+    token: str,
+    project_id: int,
+    branch: str,
+    ref: str = "main",
+    timeout_s: int = 20,
+) -> None:
+    """POST /projects/:id/repository/branches"""
+    url = _url(host, f"/projects/{project_id}/repository/branches")
+    try:
+        r = requests.post(url, headers=_headers(token), json={"branch": branch, "ref": ref}, timeout=timeout_s)
+    except requests.RequestException as e:
+        raise _unreachable_error(host, e) from e
+    if r.status_code == 401:
+        raise _auth_error(host)
+    if r.status_code in (200, 201):
+        return
+    if r.status_code == 400 and "already exists" in (r.text or "").lower():
+        return  # branch already exists, fine
+    raise GitLabError(f"Failed to create branch '{branch}' (HTTP {r.status_code}).")
+
+
+def upsert_repository_file(
+    host: str,
+    token: str,
+    project_id: int,
+    file_path: str,
+    content: str,
+    branch: str,
+    commit_message: str,
+    timeout_s: int = 20,
+) -> None:
+    """Create or update a file in the repository."""
+    import base64
+    enc = quote(file_path, safe="")
+    url = _url(host, f"/projects/{project_id}/repository/files/{enc}")
+    payload = {
+        "branch": branch,
+        "content": content,
+        "commit_message": commit_message,
+        "encoding": "text",
+    }
+    try:
+        # Try update first
+        r = requests.put(url, headers=_headers(token), json=payload, timeout=timeout_s)
+        if r.status_code in (200, 201):
+            return
+        if r.status_code == 404:
+            # File doesn't exist, create it
+            r = requests.post(url, headers=_headers(token), json=payload, timeout=timeout_s)
+            if r.status_code in (200, 201):
+                return
+    except requests.RequestException as e:
+        raise _unreachable_error(host, e) from e
+    if r.status_code == 401:
+        raise _auth_error(host)
+    raise GitLabError(f"Failed to upsert file '{file_path}' (HTTP {r.status_code}): {r.text}")
+
+
+def create_merge_request(
+    host: str,
+    token: str,
+    project_id: int,
+    source_branch: str,
+    target_branch: str,
+    title: str,
+    description: str = "",
+    timeout_s: int = 20,
+) -> str:
+    """POST /projects/:id/merge_requests — returns MR web URL."""
+    url = _url(host, f"/projects/{project_id}/merge_requests")
+    payload = {
+        "source_branch": source_branch,
+        "target_branch": target_branch,
+        "title": title,
+        "description": description,
+        "remove_source_branch": True,
+    }
+    try:
+        r = requests.post(url, headers=_headers(token), json=payload, timeout=timeout_s)
+    except requests.RequestException as e:
+        raise _unreachable_error(host, e) from e
+    if r.status_code == 401:
+        raise _auth_error(host)
+    if r.status_code in (200, 201):
+        return str(r.json().get("web_url", ""))
+    raise GitLabError(f"Failed to create MR (HTTP {r.status_code}): {r.text}")
+
+
 def delete_project_variable(
     host: str,
     token: str,

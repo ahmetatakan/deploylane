@@ -17,6 +17,7 @@ from .commands.auth import config_app, profile_app, login, logout, whoami
 from .commands.projects import project_app
 from .commands.vars import vars_app
 from .commands.deploy import deploy_app
+from .commands.ci import ci_app
 from .commands.workspace import (
     workspace_init,
     workspace_add,
@@ -48,6 +49,7 @@ app.command("scaffold", rich_help_panel="Workspace")(workspace_scaffold)
 
 app.add_typer(vars_app,   name="vars",   rich_help_panel="Operations")
 app.add_typer(deploy_app, name="deploy", rich_help_panel="Operations")
+app.add_typer(ci_app,     name="ci",     rich_help_panel="Operations")
 
 # ─── Tools ────────────────────────────────────────────────────────────────────
 

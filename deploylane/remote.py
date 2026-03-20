@@ -120,3 +120,37 @@ def ssh_symlink(dest: str, target_path: str, link_path: str, dry_run: bool = Tru
     """
     cmd = f"ln -sfn {target_path} {link_path}"
     ssh_run(dest, cmd, dry_run=dry_run)
+
+
+def ssh_capture(dest: str, remote_cmd: str) -> str:
+    """Run a remote command and return stdout. Raises RemoteError on failure."""
+    require_tools("ssh")
+    result = subprocess.run(
+        ["ssh", dest, remote_cmd],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RemoteError(result.stderr.strip() or f"Command failed: {remote_cmd}")
+    return result.stdout
+
+
+def remote_file_exists(dest: str, remote_path: str) -> bool:
+    """Check if a remote file exists via SSH."""
+    require_tools("ssh")
+    result = subprocess.run(
+        ["ssh", dest, f"test -f {remote_path}"],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def read_remote_file(dest: str, remote_path: str) -> str:
+    """Read a remote file via SSH. Raises RemoteError if not found or unreadable."""
+    require_tools("ssh")
+    result = subprocess.run(
+        ["ssh", dest, f"cat {remote_path}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RemoteError(f"Could not read remote file: {remote_path}")
+    return result.stdout
