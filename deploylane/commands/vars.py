@@ -65,15 +65,45 @@ def vars_get(
         data = demo_template(project.gitlab_project)
     else:
         typer.echo(f"[{name}] Exporting {len(vars_list)} variables...")
+
+        # Load existing vars.yml to preserve masked values (API never returns them)
+        existing: Dict[str, Any] = {}
+        if vars_path.exists():
+            try:
+                existing = read_vars_file(vars_path).get("variables") or {}
+            except Exception:
+                pass
+
         data = {"project": project.gitlab_project, "scope": "*", "variables": {}}
+        masked_missing: list = []
+
         for v in vars_list:
             env_scope = str(getattr(v, "environment_scope", "*") or "*").strip() or "*"
+
+            if v.masked and v.value is None:
+                # Preserve existing value if available, otherwise warn
+                existing_meta = existing.get(v.key) or {}
+                preserved = str(existing_meta.get("value", "")).strip() if isinstance(existing_meta, dict) else ""
+                if not preserved:
+                    masked_missing.append(v.key)
+                value = preserved
+            else:
+                value = v.value or ""
+
             data["variables"][v.key] = {
-                "value": v.value or "",
+                "value": value,
                 "masked": bool(v.masked),
                 "protected": bool(v.protected),
                 "environment_scope": env_scope,
             }
+
+        if masked_missing:
+            typer.secho(
+                f"  ⚠ {len(masked_missing)} masked variable(s) have no value (GitLab API never returns masked values):",
+                fg=typer.colors.YELLOW,
+            )
+            for k in masked_missing:
+                typer.secho(f"    - {k}  ← fill in vars.yml before running 'vars apply'", fg=typer.colors.YELLOW)
 
     vars_path.parent.mkdir(parents=True, exist_ok=True)
     write_vars_file(vars_path, data)
@@ -204,11 +234,21 @@ def vars_apply(
 
         failed = 0
         for key, env_scope, meta in desired_items:
+            value = str(meta.get("value", ""))
+            is_masked = bool(meta.get("masked", False))
+
+            if is_masked and not value.strip():
+                typer.secho(
+                    f"  SKIP {key}\tenv={env_scope}  (masked, value is empty — fill in vars.yml first)",
+                    fg=typer.colors.YELLOW,
+                )
+                continue
+
             try:
                 provider.set_variable(
                     project_id=prj.id,
-                    key=key, value=str(meta.get("value", "")),
-                    masked=bool(meta.get("masked", False)),
+                    key=key, value=value,
+                    masked=is_masked,
                     protected=bool(meta.get("protected", False)),
                     environment_scope=env_scope,
                     variable_type=str(meta.get("variable_type", "env_var") or "env_var").strip() or "env_var",
