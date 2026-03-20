@@ -373,3 +373,80 @@ def vars_diff(
         typer.echo("")
 
     raise typer.Exit(code=2)
+
+
+@vars_app.command("prune")
+def vars_prune(
+    ctx: typer.Context,
+    name: Optional[str] = typer.Argument(None, help="Project alias"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    file: Optional[Path] = typer.Option(None, "--file", help="workspace.yml path"),
+):
+    """Delete GitLab variables that are not in vars.yml."""
+    if not name:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+
+    ws_path = _resolve_ws(file)
+    vars_path = _ws_vars_file(name, ws_path)
+
+    if not vars_path.exists():
+        _err(f"vars.yml not found: {vars_path}\nRun: dlane vars get {name}")
+
+    ws = load_workspace(ws_path)
+    prof = get_workspace_profile_or_exit(ws)
+    provider = get_provider(prof)
+    data = read_vars_file(vars_path)
+    project = str(data.get("project") or "").strip()
+    scope_default = _norm_scope(data.get("scope"), "*")
+    variables = data.get("variables", {})
+
+    try:
+        prj = provider.get_project(project)
+        current_vars = provider.list_variables(prj.id)
+    except ProviderError as e:
+        _err(str(e))
+
+    desired_pairs: set = set()
+    for k, e, _ in _iter_yaml_vars(scope_default, variables):
+        desired_pairs.add((k, e))
+
+    orphans = sorted(
+        [
+            (str(getattr(v, "key", "")).strip(), _norm_scope(getattr(v, "environment_scope", "*"), "*"))
+            for v in current_vars
+            if (str(getattr(v, "key", "")).strip(), _norm_scope(getattr(v, "environment_scope", "*"), "*")) not in desired_pairs
+            and str(getattr(v, "key", "")).strip()
+        ],
+        key=lambda x: (x[0].lower(), x[1]),
+    )
+
+    if not orphans:
+        typer.secho(f"[{name}] Nothing to prune — GitLab variables match vars.yml.", fg=typer.colors.GREEN)
+        return
+
+    typer.secho(f"[{name}] Variables in GitLab not in vars.yml ({len(orphans)}):", fg=typer.colors.RED, bold=True)
+    for k, e in orphans:
+        typer.echo(f"  - {k}\tenv={e}")
+    typer.echo("")
+
+    if not yes:
+        typer.confirm(
+            f"  Delete {len(orphans)} variable(s) from GitLab? This cannot be undone.",
+            abort=True,
+        )
+
+    failed = 0
+    for k, e in orphans:
+        try:
+            provider.delete_variable(project_id=prj.id, key=k, environment_scope=e)
+            typer.echo(f"  DEL {k}\tenv={e}")
+        except ProviderError as ex:
+            typer.secho(f"  FAIL {k}\tenv={e}: {ex}", fg=typer.colors.RED)
+            failed += 1
+
+    if failed:
+        typer.secho(f"[{name}] Done with {failed} failure(s).", fg=typer.colors.YELLOW)
+        raise typer.Exit(code=1)
+    else:
+        typer.secho(f"[{name}] Pruned {len(orphans)} variable(s).", fg=typer.colors.GREEN)
