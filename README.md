@@ -324,7 +324,7 @@ Add to your `.gitignore`:
 | `dlane vars plan <name>` | Preview what would change |
 | `dlane vars diff <name>` | Diff local vs GitLab |
 | `dlane vars apply <name>` | Push `vars.yml` → GitLab |
-| `dlane vars prune <name>` | Delete GitLab vars not in `vars.yml` |
+| `dlane vars prune <name>` | Delete GitLab vars not in `vars.yml` (shows list + confirms before deleting) |
 
 ### Deploy
 | Command | Description |
