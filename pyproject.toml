@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "deploylane"
 version = "0.3.1"
-description = "Deployment configs as code. GitLab CI & GitHub Actions variable management CLI."
+description = "Deployment configs as code. GitLab CI variables as code. Reproducible deploys every time."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
@@ -57,6 +57,9 @@ dev = [
   "mypy>=1.8.0",
   "PyNaCl>=1.5.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["."]

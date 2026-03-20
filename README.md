@@ -258,6 +258,26 @@ All `vars` and `ci` commands use the workspace profile automatically. A warning 
 
 ---
 
+## CI variable management — masked variables
+
+GitLab never returns masked variable values via the API (by design). This affects `vars get`:
+
+- **Non-masked variables** — full round-trip: `get` → edit → `apply` ✅
+- **Masked variables** — write-only: `get` fetches the key and metadata but **not the value**
+
+When you run `vars get`, masked variables with no existing value in `vars.yml` are flagged:
+```
+⚠ 2 masked variable(s) have no value — fill in vars.yml before running 'vars apply'
+  - PROD_SSH_KEY
+  - REGISTRY_PASS
+```
+
+If `vars.yml` already exists, previously filled values are preserved. `vars apply` skips any masked variable with an empty value rather than pushing an empty string.
+
+**Recommendation:** treat `vars.yml` as the source of truth. Don't rely on `vars get` to recover masked values — fill them in once and keep the file.
+
+---
+
 ## Security
 
 - GitLab token stored at `~/.config/deploylane/config.toml` with `0600` permissions
@@ -329,10 +349,21 @@ Add to your `.gitignore`:
 
 ---
 
+## Platform support
+
+| Platform | vars | ci | deploy |
+|---|---|---|---|
+| GitLab | ✅ Full | ✅ Full (MR flow) | ✅ Full |
+| GitHub Actions | 🧪 Experimental | ❌ Not yet | ✅ Full (SSH-based) |
+
+GitHub Actions variable/secret management is available via `pip install deploylane[github]` but is not yet covered by the full command set (`ci pull/push` is GitLab-only for now).
+
+---
+
 ## Development
 
 ```bash
-git clone https://github.com/yourorg/deploylane
+git clone https://github.com/ahmetatakan/deploylane
 cd deploylane
 pip install -e ".[dev]"
 python -m build
