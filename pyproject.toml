@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deploylane"
-version = "0.3.1"
+version = "0.3.2"
 description = "Deployment configs as code. GitLab CI variables as code. Reproducible deploys every time."
 readme = "README.md"
 license = "Apache-2.0"
