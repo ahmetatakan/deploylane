@@ -316,6 +316,7 @@ def _sync_deploy_yml_from_vars(name: str, project_path: Path, ws_path: Path) -> 
                 t_data[field] = val
                 changed.append(f"{t_name}.{field} ← {var_key}")
 
+
     if changed:
         deploy_yml.write_text(_yaml.dump(raw, default_flow_style=False, allow_unicode=True), encoding="utf-8")
         for c in changed:
