@@ -122,11 +122,16 @@ def ci_pull(
     local_ci = _local_ci(ws_path, name)
     prof = get_workspace_profile_or_exit(ws)
 
-    typer.secho(f"[{name}] CI pull from {project.gitlab_project} (ref={ref})", fg=typer.colors.CYAN)
-
     try:
         gl_project = get_project_by_path(prof.host, prof.token, project.gitlab_project)
-        remote_content = get_repository_file(prof.host, prof.token, gl_project.id, CI_FILE, ref=ref)
+    except GitLabError as e:
+        _err(str(e))
+
+    effective_ref = gl_project.default_branch or ref
+    typer.secho(f"[{name}] CI pull from {project.gitlab_project} (ref={effective_ref})", fg=typer.colors.CYAN)
+
+    try:
+        remote_content = get_repository_file(prof.host, prof.token, gl_project.id, CI_FILE, ref=effective_ref)
     except GitLabError as e:
         _err(str(e))
 
