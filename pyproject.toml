@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "deploylane"
-version = "0.3.6"
+version = "0.3.7"
 description = "Manage Docker Compose deployments and CI variables as code — GitLab & GitHub Actions"
 readme = "README.md"
 license = "Apache-2.0"
