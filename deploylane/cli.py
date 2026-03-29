@@ -24,7 +24,7 @@ from .commands.workspace import (
     workspace_update,
     workspace_remove,
     workspace_list,
-    workspace_scaffold,
+    workspace_sync,
 )
 
 app = typer.Typer(add_completion=True, no_args_is_help=True)
@@ -43,7 +43,8 @@ app.command("add",    rich_help_panel="Workspace")(workspace_add)
 app.command("update", rich_help_panel="Workspace")(workspace_update)
 app.command("remove", rich_help_panel="Workspace")(workspace_remove)
 app.command("list",     rich_help_panel="Workspace")(workspace_list)
-app.command("scaffold", rich_help_panel="Workspace")(workspace_scaffold)
+app.command("sync",     rich_help_panel="Workspace")(workspace_sync)
+app.command("scaffold", rich_help_panel="Workspace", hidden=True)(workspace_sync)  # deprecated alias
 
 # ─── Operations ───────────────────────────────────────────────────────────────
 

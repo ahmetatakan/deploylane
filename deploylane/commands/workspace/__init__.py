@@ -16,8 +16,80 @@ from ...workspace import (
     WORKSPACE_FILE_NAME,
 )
 from .._utils import _err
-from .init import project_init, workspace_scaffold, _run_init_in_dir
+from .init import workspace_sync, _run_init_in_dir
 from ._utils import _ws_file_option, _resolve_ws
+
+
+# ─── UX helpers ───────────────────────────────────────────────────────────────
+
+def _rule(label: str = "") -> None:
+    if label:
+        typer.echo("")
+        typer.secho(f"  ── {label} ", fg=typer.colors.CYAN, bold=True)
+        typer.echo("")
+    else:
+        typer.secho("  " + "─" * 52, fg=typer.colors.WHITE)
+
+
+def _ok(msg: str) -> None:
+    typer.secho(f"  ✓  {msg}", fg=typer.colors.GREEN)
+
+
+def _warn(msg: str) -> None:
+    typer.secho(f"  ⚠  {msg}", fg=typer.colors.YELLOW)
+
+
+def _print_next_steps(alias: str, strategy: str = "plain") -> None:
+    is_bluegreen = strategy == "bluegreen"
+    typer.echo("")
+    typer.secho("  ─────────────────────────────────────────────────────", fg=typer.colors.CYAN)
+    typer.secho("  What to do next", fg=typer.colors.CYAN, bold=True)
+    typer.secho("  ─────────────────────────────────────────────────────", fg=typer.colors.CYAN)
+    typer.echo("")
+
+    step = 1
+
+    typer.secho(f"  [ ] {step}.", bold=True, nl=False)
+    typer.echo("  Edit .deploylane/deploy.yml")
+    typer.echo("        Set host, user and deploy_dir for each target")
+    typer.echo("")
+    step += 1
+
+    typer.secho(f"  [ ] {step}.", bold=True, nl=False)
+    typer.echo("  Fill in .deploylane/vars.yml")
+    typer.echo("        SSH key, registry credentials (REGISTRY_USER, REGISTRY_PASS)")
+    typer.echo("")
+    step += 1
+
+    typer.secho(f"  [ ] {step}.", bold=True, nl=False)
+    typer.secho(f"  dlane vars apply {alias}", fg=typer.colors.CYAN, nl=False)
+    typer.echo("   → push CI variables to GitLab")
+    typer.echo("")
+    step += 1
+
+    typer.secho(f"  [ ] {step}.", bold=True, nl=False)
+    typer.secho(f"  dlane deploy push {alias} --yes", fg=typer.colors.CYAN, nl=False)
+    typer.echo("   → upload compose + deploy.sh to server")
+    typer.echo("")
+    step += 1
+
+    if is_bluegreen:
+        typer.secho(f"  [ ] {step}.", bold=True, nl=False)
+        typer.secho(f"  dlane deploy install {alias} --yes", fg=typer.colors.CYAN, nl=False)
+        typer.echo("   → one-time nginx + sudoers setup (bluegreen only, per server)")
+        typer.echo("")
+        step += 1
+
+    typer.secho(f"  [ ] {step}.", bold=True, nl=False)
+    typer.secho(f"  dlane ci push {alias}", fg=typer.colors.CYAN, nl=False)
+    typer.echo("         → create MR to add .gitlab-ci.yml to repo")
+    typer.echo("")
+
+    typer.secho("  Tip: run ", nl=False)
+    typer.secho(f"dlane sync {alias}", fg=typer.colors.CYAN, nl=False)
+    typer.echo(" any time you edit deploy.yml")
+    typer.secho("  ─────────────────────────────────────────────────────", fg=typer.colors.CYAN)
+    typer.echo("")
 
 
 def workspace_init(
@@ -27,30 +99,106 @@ def workspace_init(
     ws_path = file or Path(WORKSPACE_FILE_NAME)
     if ws_path.exists():
         _err(f"{ws_path} already exists. Use 'dlane add' to add projects.")
+
+    # Welcome banner
+    typer.echo("")
+    typer.secho("  ╭──────────────────────────────────────╮", fg=typer.colors.CYAN)
+    typer.secho("  │   DeployLane — Workspace Setup       │", fg=typer.colors.CYAN, bold=True)
+    typer.secho("  ╰──────────────────────────────────────╯", fg=typer.colors.CYAN)
+    typer.echo("")
+
+    # Create workspace
     Path(WORKSPACE_DIR_NAME).mkdir(exist_ok=True)
     ws = WorkspaceFile(version=1, projects=[], default_profile="default")
     save_workspace(ws, ws_path)
-    typer.secho(f"Workspace created at {ws_path}", fg=typer.colors.GREEN)
+    _ok(f"Workspace created → {ws_path}")
 
-    # Check login status and hint if not logged in
+    # Check login status
+    typer.echo("")
+    logged_in = False
     try:
-        from ...auth import load_active_profile
+        from ...auth import load_active_profile, get_provider
+        from ...providers.base import ProviderError
         prof = load_active_profile()
-        typer.secho(f"Logged in as: {prof.host}", fg=typer.colors.CYAN)
+        try:
+            user = get_provider(prof).whoami()
+            _ok(f"Logged in as {user.username} @ {prof.host}")
+            logged_in = True
+        except ProviderError:
+            _ok(f"Profile active: {prof.host}")
+            logged_in = True
     except Exception:
+        _warn("Not logged in yet.")
+        typer.echo("     Run: dlane login --host https://gitlab.example.com")
         typer.echo("")
-        typer.secho("Not logged in yet.", fg=typer.colors.YELLOW)
-        typer.echo("  Run: dlane login --host https://gitlab.example.com")
+        if not typer.confirm("  Continue setup without logging in?", default=False):
+            typer.echo("")
+            typer.echo("  Run 'dlane login' then 'dlane init' again.")
+            raise typer.Exit(0)
+
+    # Offer to add first project now
+    typer.echo("")
+    if not typer.confirm("  Add your first project now?", default=True):
+        typer.echo("")
+        typer.echo("  When you're ready:")
+        typer.echo("    dlane add <name> --gitlab-project <group/project>")
+        typer.echo("    dlane sync <name>")
+        typer.echo("")
+        return
+
+    # Interactive project add
+    _rule("Add a project")
+    name = typer.prompt("  Project alias (short name, e.g. backend)").strip()
+    gitlab_project = typer.prompt("  GitLab project path (e.g. group/backend)").strip()
 
     typer.echo("")
-    typer.secho("Getting started:", bold=True)
-    typer.echo("  1) dlane add <name> --gitlab-project <group/project> --strategy bluegreen")
-    typer.echo("  2) dlane scaffold <name>")
-    typer.echo("  3) dlane vars apply <name>")
-    typer.echo("  4) dlane deploy push <name> --yes")
-    typer.echo("  5) dlane deploy install <name> --yes  (once per server)")
+    typer.echo("  Deployment strategy:")
+    typer.secho("    plain     ", bold=True, nl=False)
+    typer.echo("→  single container (brief downtime on deploy)")
+    typer.secho("    bluegreen ", bold=True, nl=False)
+    typer.echo("→  two containers, zero-downtime switching (recommended)")
     typer.echo("")
-    typer.echo("  Run 'dlane --help' to see all commands.")
+    strategy_input = typer.prompt("  Strategy", default="bluegreen").strip()
+    strategy = strategy_input if is_valid_strategy(strategy_input) else "plain"
+    if not is_valid_strategy(strategy_input):
+        _warn(f"Unknown strategy '{strategy_input}', defaulting to 'plain'")
+
+    resolved_path = name
+    project_path = (ws_path.parent / resolved_path).resolve()
+    project_path.mkdir(parents=True, exist_ok=True)
+
+    ws.projects.append(WorkspaceProject(
+        name=name,
+        path=resolved_path,
+        gitlab_project=gitlab_project,
+        strategy=strategy,
+        description="",
+        tags=[],
+    ))
+    save_workspace(ws, ws_path)
+    typer.echo("")
+    _ok(f"Added '{name}' ({strategy}) → {gitlab_project}")
+
+    # Offer to scaffold now
+    typer.echo("")
+    if typer.confirm("  Sync deployment files now?", default=True):
+        from .init import _do_scaffold
+        _rule(f"Syncing '{name}'")
+        try:
+            _do_scaffold(name, ws_path)
+            typer.echo("")
+            _ok(f"All files created in .workspace/{name}/.deploylane/")
+        except SystemExit:
+            raise
+        except Exception as e:
+            _warn(f"Sync failed: {e}")
+            typer.echo(f"     Run manually: dlane sync {name}")
+
+        _print_next_steps(name, strategy)
+    else:
+        typer.echo("")
+        typer.echo(f"  Run when ready:  dlane sync {name}")
+        _print_next_steps(name, strategy)
 
 
 def workspace_add(
@@ -65,9 +213,28 @@ def workspace_add(
     init: bool = typer.Option(False, "--init", help="Scaffold .deploylane/ in the project directory after adding"),
 ):
     """Add a project to the workspace. Creates .workspace/<name>/ by default."""
+    interactive = not name and not gitlab_project and not strategy
+
+    if not name and gitlab_project:
+        # Has --gitlab-project but no name — infer from project path
+        name = gitlab_project.split("/")[-1] if gitlab_project else None
+
     if not name:
-        typer.echo(ctx.get_help())
-        raise typer.Exit(0)
+        # Interactive mode
+        _rule("Add a project")
+        name = typer.prompt("  Project alias (short name, e.g. backend)").strip()
+        if not gitlab_project:
+            gitlab_project = typer.prompt("  GitLab project path (e.g. group/backend)").strip()
+        if not strategy:
+            typer.echo("")
+            typer.echo("  Deployment strategy:")
+            typer.secho("    plain     ", bold=True, nl=False)
+            typer.echo("→  single container (brief downtime on deploy)")
+            typer.secho("    bluegreen ", bold=True, nl=False)
+            typer.echo("→  two containers, zero-downtime switching (recommended)")
+            typer.echo("")
+            strategy = typer.prompt("  Strategy", default="bluegreen").strip()
+
     if not gitlab_project:
         _err(f"Missing required option: --gitlab-project\n  Try: dlane add {name} --gitlab-project <group/project> --strategy <strategy>")
     if not strategy:
@@ -89,7 +256,7 @@ def workspace_add(
 
     if not project_path.exists():
         project_path.mkdir(parents=True, exist_ok=True)
-        typer.secho(f"  Created {project_path}", fg=typer.colors.GREEN)
+        typer.secho(f"  ✓  Created {project_path}", fg=typer.colors.GREEN)
 
     ws.projects.append(WorkspaceProject(
         name=name,
@@ -100,12 +267,23 @@ def workspace_add(
         tags=list(tag) if tag else [],
     ))
     save_workspace(ws, ws_path)
-    typer.secho(f"Added '{name}' ({strategy}) to {ws_path}", fg=typer.colors.GREEN)
+    _ok(f"Added '{name}' ({strategy}) to workspace")
 
-    if init:
-        _run_init_in_dir(project_path, strategy=strategy, project=gitlab_project, ws_name=name)
+    if init or (interactive and typer.confirm(f"\n  Sync deployment files now?", default=True)):
+        from .init import _do_scaffold
+        _rule(f"Syncing '{name}'")
+        try:
+            _do_scaffold(name, ws_path)
+            typer.echo("")
+            _ok(f"All files created in .workspace/{name}/.deploylane/")
+        except SystemExit:
+            raise
+        except Exception as e:
+            _warn(f"Sync failed: {e}")
+            typer.echo(f"     Run manually: dlane sync {name}")
+        _print_next_steps(name, strategy)
     else:
-        typer.echo(f"  Next: dlane scaffold {name}")
+        typer.echo(f"\n  Next: dlane sync {name}")
 
 
 def workspace_update(
@@ -263,6 +441,5 @@ __all__ = [
     "workspace_update",
     "workspace_remove",
     "workspace_list",
-    "workspace_scaffold",
-    "project_init",
+    "workspace_sync",
 ]
