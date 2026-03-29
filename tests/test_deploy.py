@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 
 from deploylane.commands.deploy import _parse_env, _compose_diff, _push_project
 from deploylane.remote import RemoteError
+from deploylane.deploystate import write_state, local_file_hashes
 
 
 # ─── _parse_env ───────────────────────────────────────────────────────────────
@@ -105,6 +106,11 @@ targets:
     compose_dir = proj / "compose"
     compose_dir.mkdir()
     (compose_dir / f"{strategy}.yml").write_text(LOCAL_COMPOSE)
+
+    # Write a pull state so push tests that run with yes=True pass the
+    # pull-before-push check by default (tests needing no-state can skip this).
+    hashes = local_file_hashes(proj, strategy, "docker-compose.yml", "deploy.sh")
+    write_state(proj, "prod", "10.0.0.1", hashes)
 
     return ws_file
 

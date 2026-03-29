@@ -300,7 +300,12 @@ def set_project_variable(
     if r.status_code == 401:
         raise _auth_error(host)
     if r.status_code == 403:
-        raise _scope_error(host)
+        raise GitLabError(
+            f"Access denied (HTTP 403): {r.text}\n"
+            f"  Possible causes: missing 'api' scope OR insufficient project role (need Maintainer/Owner)\n"
+            f"  Fix: GitLab → User Settings → Access Tokens → enable 'api' scope\n"
+            f"  Then run: dlane login --host {host}"
+        )
 
     # 2) Create failed - try update for common "exists" cases
     if r.status_code in (400, 409):

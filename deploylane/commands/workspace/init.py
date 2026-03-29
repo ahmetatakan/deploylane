@@ -103,6 +103,8 @@ targets:
     deploy_dir: "{resolved_deploy_dir}"
     env_scope: production
     strategy: {resolved_strategy}
+    compose_file: docker-compose.yml  # server-side filename (rename freely)
+    deploy_script: deploy.sh          # server-side script name (rename freely)
     health_host: ""         # optional: domain for nginx health check
     ports:
       blue: {port_blue}
@@ -114,13 +116,15 @@ targets:
     deploy_dir: "{staging_deploy_dir}"
     env_scope: staging
     strategy: plain
+    compose_file: docker-compose.yml
+    deploy_script: deploy.sh
     health_host: ""
     ports:
       blue: {port_blue + 100}
       green: {port_green + 100}
 """
     deploy_yml_path.write_text(deploy_yml_content, encoding="utf-8")
-    typer.secho(f"  Created {deploy_yml_path}", fg=typer.colors.GREEN)
+    typer.secho(f"  ✓  {deploy_yml_path}", fg=typer.colors.GREEN)
 
     vars_yml_content = f"""\
 project: {project}
@@ -147,38 +151,16 @@ variables:
         typer.secho(f"  Skipped {vars_yml_path} (preserved)", fg=typer.colors.YELLOW)
     elif not vars_yml_path.exists() or force:
         vars_yml_path.write_text(vars_yml_content, encoding="utf-8")
-        typer.secho(f"  Created {vars_yml_path}", fg=typer.colors.GREEN)
+        typer.secho(f"  ✓  {vars_yml_path}", fg=typer.colors.GREEN)
     else:
         typer.secho(f"  Skipped {vars_yml_path} (already exists)", fg=typer.colors.YELLOW)
 
     if script_src.exists():
         shutil.copy2(str(script_src), str(script_dst))
         script_dst.chmod(0o755)
-        typer.secho(f"  Created {script_dst}", fg=typer.colors.GREEN)
+        typer.secho(f"  ✓  {script_dst}", fg=typer.colors.GREEN)
     else:
         typer.secho(f"  Warning: deploy.sh template not found at {script_src}", fg=typer.colors.YELLOW)
-
-    alias = ws_name or project.split("/")[-1]
-
-    typer.echo("")
-    typer.secho("Done!", fg=typer.colors.GREEN, bold=True)
-    typer.echo(f"  Project  : {project}")
-    typer.echo(f"  Strategy : {resolved_strategy}")
-    typer.echo(f"  Files    : {deploy_yml_path.parent}/")
-    typer.echo("")
-    typer.secho("Next steps:", fg=typer.colors.CYAN, bold=True)
-    typer.echo(f"  1) Edit {deploy_yml_path}")
-    typer.echo(f"       → Set host, user, deploy_dir for each target")
-    typer.echo(f"  2) Fill in {vars_yml_path}")
-    typer.echo(f"       → Set values for PROD_HOST, PROD_SSH_KEY, REGISTRY_USER, REGISTRY_PASS, etc.")
-    typer.echo(f"  3) dlane vars apply {alias}")
-    typer.echo(f"       → Push variables to GitLab CI")
-    typer.echo(f"  4) dlane deploy push {alias} --yes")
-    typer.echo(f"       → Sync .env + docker-compose.yml + deploy.sh to the server")
-    typer.echo(f"  5) dlane deploy install {alias} --yes")
-    typer.echo(f"       → One-time server setup: nginx + sudoers + install.sh")
-    typer.echo("")
-    typer.echo(f"  Tip: copy {deploy_yml_path.parent}/ci/.gitlab-ci.yml to your project repo")
 
 
 def _run_init_in_dir(
@@ -207,34 +189,17 @@ def _run_init_in_dir(
         os.chdir(orig)
 
 
-def workspace_scaffold(
-    ctx: typer.Context,
-    name: Optional[str] = typer.Argument(None, help="Project alias"),
-    force: bool = typer.Option(False, "--force", help="Overwrite existing compose files"),
-    file: Optional[Path] = typer.Option(None, "--file", help="workspace.yml path"),
-):
-    """
-    Regenerate .deploylane/ files from the existing deploy.yml.
-
-    - deploy.yml is created only if it doesn't exist (never overwritten).
-    - compose/ files are created only if they don't exist (use --force to overwrite).
-    - Always regenerates: deploy.sh, env/, nginx/, sudoers/, install.sh.
-    """
-    if not name:
-        typer.echo(ctx.get_help())
-        raise typer.Exit(0)
-
+def _do_scaffold(name: str, ws_path: Path) -> None:
+    """Core scaffold logic, callable programmatically."""
     from ._utils import _resolve_ws
     from ...workspace import load_workspace, project_deploy_yml
 
-    ws_path = _resolve_ws(file)
     ws = load_workspace(ws_path)
     project = next((p for p in ws.projects if p.name == name), None)
     if not project:
         _err(f"Project '{name}' not found in workspace.")
 
     project_path = (ws_path.parent / project.path).resolve()
-    script_dst = project_path / ".deploylane" / "scripts" / "deploy.sh"
     script_src = Path(__file__).parent.parent.parent / "scripts" / "deploy.sh"
 
     (project_path / ".deploylane" / "scripts").mkdir(parents=True, exist_ok=True)
@@ -242,29 +207,141 @@ def workspace_scaffold(
     if not script_src.exists():
         _err(f"deploy.sh not found in package: {script_src}")
 
-    shutil.copy2(str(script_src), str(script_dst))
-    script_dst.chmod(0o755)
-    typer.secho(f"[{name}] Updated deploy.sh", fg=typer.colors.GREEN)
-
     deploy_yml = project_deploy_yml(project, ws_path.parent)
 
     if not deploy_yml.exists():
+        # _do_init handles the deploy.sh copy internally
         _run_init_in_dir(
             project_path,
             strategy=project.strategy,
             project=project.gitlab_project,
             ws_name=name,
-            skip_vars=True,  # scaffold never touches vars.yml — managed by 'vars get/apply'
+            skip_vars=True,
         )
-        typer.secho(f"[{name}] Created deploy.yml (fill in host/user/deploy_dir)", fg=typer.colors.YELLOW)
     else:
-        typer.secho(f"[{name}] deploy.yml exists — reading targets from it", fg=typer.colors.CYAN)
+        # deploy.yml already exists — update deploy.sh, migrate schema, sync from vars.yml
+        script_dst = project_path / ".deploylane" / "scripts" / "deploy.sh"
+        shutil.copy2(str(script_src), str(script_dst))
+        script_dst.chmod(0o755)
+        typer.secho(f"  ✓  scripts/deploy.sh", fg=typer.colors.GREEN)
+
+        # Inject any missing fields that were added to the schema since this file was created
+        added = _migrate_deploy_yml(deploy_yml)
+        if added:
+            for a in added:
+                typer.secho(f"  + deploy.yml: added {a} (new field, default value)", fg=typer.colors.CYAN)
+        else:
+            typer.secho(f"  ✓  deploy.yml  (up to date)", fg=typer.colors.GREEN)
+
         _sync_deploy_yml_from_vars(name, project_path, ws_path)
 
-    # Always regenerate derived files from current deploy.yml
-    _scaffold_infra(name, project_path, ws_path, force=force)
+    _scaffold_infra(name, project_path, ws_path)
 
-    typer.secho(f"[{name}] Scaffold OK", fg=typer.colors.GREEN)
+
+def workspace_sync(
+    ctx: typer.Context,
+    name: Optional[str] = typer.Argument(None, help="Project alias"),
+    file: Optional[Path] = typer.Option(None, "--file", help="workspace.yml path"),
+):
+    """
+    Sync .deploylane/ files from deploy.yml. Safe to run at any time.
+
+    Always updates:  deploy.sh, env/, nginx/, sudoers/, install.sh, deploy.yml schema
+    Creates once:    deploy.yml, compose/, vars.yml, ci/.gitlab-ci.yml
+                     (to reset a create-once file: delete it, then re-run sync)
+    """
+    if not name:
+        typer.echo(ctx.get_help())
+        raise typer.Exit(0)
+
+    from ._utils import _resolve_ws
+    ws_path = _resolve_ws(file)
+    _do_scaffold(name, ws_path)
+    typer.secho(f"\n  ✓  [{name}] Sync complete", fg=typer.colors.GREEN, bold=True)
+
+
+# Fields that must exist per target, with (default_value, inline_comment).
+# Add new fields here when the schema evolves — scaffold will inject them automatically.
+_TARGET_REQUIRED_FIELDS: list[tuple[str, str, str]] = [
+    ("compose_file", "docker-compose.yml", "# server-side filename (rename freely)"),
+    ("deploy_script", "deploy.sh",         "# server-side script name (rename freely)"),
+]
+
+# The field after which new fields are injected (must exist in every target block).
+_INJECT_AFTER = "strategy"
+
+
+def _migrate_deploy_yml(deploy_yml: Path) -> list[str]:
+    """Inject missing per-target fields into an existing deploy.yml.
+
+    Reads the file, finds targets missing any field in _TARGET_REQUIRED_FIELDS,
+    and injects the default value immediately after the _INJECT_AFTER line.
+    Returns a list of human-readable descriptions of what was added.
+    Uses line-based insertion to preserve all comments and formatting.
+    """
+    import re
+    import yaml as _yaml
+
+    try:
+        raw = _yaml.safe_load(deploy_yml.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+
+    targets_raw = raw.get("targets") or {}
+    if not targets_raw:
+        return []
+
+    # Build list of (target_name, field, default, comment) that are missing
+    missing: list[tuple[str, str, str, str]] = []
+    for t_name, t_data in targets_raw.items():
+        if not isinstance(t_data, dict):
+            continue
+        for field, default, comment in _TARGET_REQUIRED_FIELDS:
+            if field not in t_data:
+                missing.append((t_name, field, default, comment))
+
+    if not missing:
+        return []
+
+    text = deploy_yml.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+
+    added: list[str] = []
+
+    for t_name, field, default, comment in missing:
+        # Find target block header: "  t_name:"
+        target_pat = re.compile(r'^(\s{2})' + re.escape(t_name) + r'\s*:')
+        inject_pat = re.compile(r'^(\s+)' + re.escape(_INJECT_AFTER) + r'\s*:')
+        in_target = False
+        target_indent = 2
+
+        for i, line in enumerate(lines):
+            if target_pat.match(line):
+                in_target = True
+                continue
+            if not in_target:
+                continue
+
+            stripped = line.lstrip()
+            if stripped and not stripped.startswith('#'):
+                current_indent = len(line) - len(stripped)
+                if current_indent <= target_indent:
+                    # Left the target block without finding _INJECT_AFTER — skip
+                    break
+
+            if inject_pat.match(line):
+                # Determine indentation from the anchor line
+                m = inject_pat.match(line)
+                indent = m.group(1) if m else "    "
+                new_line = f"{indent}{field}: {default}  {comment}\n"
+                lines.insert(i + 1, new_line)
+                added.append(f"{t_name}.{field}: {default}")
+                break
+
+    if added:
+        deploy_yml.write_text(''.join(lines), encoding="utf-8")
+
+    return added
 
 
 def _sync_deploy_yml_from_vars(name: str, project_path: Path, ws_path: Path) -> None:
@@ -272,7 +349,10 @@ def _sync_deploy_yml_from_vars(name: str, project_path: Path, ws_path: Path) -> 
 
     Rule: vars.yml value is non-empty → overwrite deploy.yml field.
           vars.yml value is empty or missing → keep existing deploy.yml value.
+
+    Uses line-based replacement to preserve YAML comments and formatting.
     """
+    import re
     import yaml as _yaml
     from ...workspace import load_workspace, project_deploy_yml
 
@@ -302,25 +382,63 @@ def _sync_deploy_yml_from_vars(name: str, project_path: Path, ws_path: Path) -> 
         return ""
 
     targets_raw = raw.get("targets") or {}
-    changed: list[str] = []
-
+    # Build list of (target_name, field, new_value) updates
+    updates: list[tuple[str, str, str]] = []
     for t_name in list(targets_raw.keys()):
         t_data = targets_raw[t_name]
         if not isinstance(t_data, dict):
             continue
         prefix = t_name.upper()
-
-        for field, var_key in [("host", f"{prefix}_HOST"), ("user", f"{prefix}_USER"), ("deploy_dir", f"{prefix}_DEPLOY_DIR")]:
+        for field, var_key in [
+            ("host", f"{prefix}_HOST"),
+            ("user", f"{prefix}_USER"),
+            ("deploy_dir", f"{prefix}_DEPLOY_DIR"),
+        ]:
             val = _var(var_key)
             if val and t_data.get(field, "") != val:
-                t_data[field] = val
-                changed.append(f"{t_name}.{field} ← {var_key}")
+                updates.append((t_name, field, val))
 
+    if not updates:
+        return
 
-    if changed:
-        deploy_yml.write_text(_yaml.dump(raw, default_flow_style=False, allow_unicode=True), encoding="utf-8")
-        for c in changed:
-            typer.secho(f"  synced {c}", fg=typer.colors.CYAN)
+    # Line-based replacement to preserve comments and formatting
+    text = deploy_yml.read_text(encoding="utf-8")
+    lines = text.splitlines(keepends=True)
+
+    for t_name, field, new_val in updates:
+        # Find the target block: a line like "  t_name:" at 2-space indent
+        target_pattern = re.compile(r'^(\s{2})' + re.escape(t_name) + r'\s*:')
+        in_target = False
+        target_indent = 2
+        for i, line in enumerate(lines):
+            if target_pattern.match(line):
+                in_target = True
+                continue
+            if in_target:
+                stripped = line.lstrip()
+                if stripped and not stripped.startswith('#'):
+                    current_indent = len(line) - len(stripped)
+                    if current_indent <= target_indent:
+                        # Left the target block
+                        in_target = False
+                        continue
+                # Match the field within the block, e.g. "    host: ..." or "    host: "value""
+                m = re.match(r'^(\s+)(' + re.escape(field) + r')(\s*:\s*)(.*)$', line)
+                if m:
+                    indent, fname, sep, rest = m.group(1), m.group(2), m.group(3), m.group(4)
+                    # Strip inline comment from rest to reattach
+                    comment_match = re.search(r'\s+(#.*)$', rest.rstrip('\n\r'))
+                    comment = ('  ' + comment_match.group(1)) if comment_match else ''
+                    eol = '\n' if line.endswith('\n') else ''
+                    lines[i] = f'{indent}{fname}{sep}"{new_val}"{comment}{eol}'
+                    in_target = False  # field replaced, move to next update
+                    break
+
+    deploy_yml.write_text(''.join(lines), encoding="utf-8")
+    for t_name, field, val in updates:
+        prefix = t_name.upper()
+        var_key = {"host": f"{prefix}_HOST", "user": f"{prefix}_USER", "deploy_dir": f"{prefix}_DEPLOY_DIR"}[field]
+        typer.secho(f"  synced {t_name}.{field} ← {var_key}", fg=typer.colors.CYAN)
 
 
 def _render_env_template(strategy: str, ctx: dict) -> str:
@@ -360,7 +478,7 @@ def _render_env_template(strategy: str, ctx: dict) -> str:
     return "\n".join(lines)
 
 
-def _scaffold_infra(name: str, project_path: Path, ws_path: Path, force: bool = False) -> None:
+def _scaffold_infra(name: str, project_path: Path, ws_path: Path) -> None:
     """Generate nginx snippets, compose template, sudoers and install.sh from deploy.yml."""
     import yaml as _yaml
     from ...templates import (
@@ -430,25 +548,26 @@ def _scaffold_infra(name: str, project_path: Path, ws_path: Path, force: bool = 
     created_compose, skipped_compose = [], []
     for s in sorted(unique_strategies):
         compose_dst = compose_dir / f"{s}.yml"
-        if not compose_dst.exists() or force:
+        if not compose_dst.exists():
             compose_dst.write_text(render_compose(s, ctx), encoding="utf-8")
             created_compose.append(f"{s}.yml")
         else:
             skipped_compose.append(f"{s}.yml")
     if created_compose:
         typer.secho(
-            f"  Created .deploylane/compose/ ({', '.join(created_compose)})",
+            f"  ✓  compose/ ({', '.join(created_compose)}) — created from template, edit freely",
             fg=typer.colors.GREEN,
         )
     if skipped_compose:
         typer.secho(
-            f"  Skipped .deploylane/compose/ ({', '.join(skipped_compose)}) — already exists",
-            fg=typer.colors.YELLOW,
+            f"  ✓  compose/ ({', '.join(skipped_compose)}) — already exists, not touched",
+            fg=typer.colors.GREEN,
         )
 
     # ── .env base template per target (.deploylane/env/<target>.env) ──────────
     env_dir = base / "env"
     env_dir.mkdir(parents=True, exist_ok=True)
+    created_env, skipped_env = [], []
     for t_name, t_data in targets_raw.items():
         if not isinstance(t_data, dict):
             continue
@@ -459,7 +578,11 @@ def _scaffold_infra(name: str, project_path: Path, ws_path: Path, force: bool = 
         t_ctx["port_green"] = str(ports.get("green", 8081) if isinstance(ports, dict) else 8081)
         t_ctx["plain_port"] = str(ports.get("plain", ports.get("blue", 8080)) if isinstance(ports, dict) else 8080)
         env_file = env_dir / f"{t_name}.env"
-        env_file.write_text(_render_env_template(t_strategy, t_ctx), encoding="utf-8")
+        if not env_file.exists():
+            env_file.write_text(_render_env_template(t_strategy, t_ctx), encoding="utf-8")
+            created_env.append(f"{t_name}.env")
+        else:
+            skipped_env.append(f"{t_name}.env")
 
         local_env_file = env_dir / f"{t_name}.local.env"
         if not local_env_file.exists():
@@ -474,10 +597,16 @@ def _scaffold_infra(name: str, project_path: Path, ws_path: Path, force: bool = 
     if not gitignore.exists():
         gitignore.write_text("*.local.env\n", encoding="utf-8")
 
-    typer.secho(
-        f"  Created .deploylane/env/ ({', '.join(t + '.env' for t in sorted(targets_raw))})",
-        fg=typer.colors.GREEN,
-    )
+    if created_env:
+        typer.secho(
+            f"  ✓  env/ ({', '.join(created_env)}) — created from template, edit freely",
+            fg=typer.colors.GREEN,
+        )
+    if skipped_env:
+        typer.secho(
+            f"  ✓  env/ ({', '.join(skipped_env)}) — already exists, not touched",
+            fg=typer.colors.GREEN,
+        )
 
     # ── nginx + sudoers (bluegreen only, based on default target strategy) ────
     if strategy == "bluegreen":
@@ -526,11 +655,11 @@ def _scaffold_infra(name: str, project_path: Path, ws_path: Path, force: bool = 
     ci_dir = base / "ci"
     ci_dir.mkdir(parents=True, exist_ok=True)
     ci_dst = ci_dir / ".gitlab-ci.yml"
-    if not ci_dst.exists() or force:
+    if not ci_dst.exists():
         ci_dst.write_text(render_gitlab_ci(ctx, targets_raw, strategy_top), encoding="utf-8")
-        typer.secho(f"  Created .deploylane/ci/.gitlab-ci.yml", fg=typer.colors.GREEN)
+        typer.secho(f"  ✓  ci/.gitlab-ci.yml — created from template, edit freely", fg=typer.colors.GREEN)
     else:
-        typer.secho(f"  Skipped .deploylane/ci/.gitlab-ci.yml — already exists", fg=typer.colors.YELLOW)
+        typer.secho(f"  ✓  ci/.gitlab-ci.yml — already exists, not touched", fg=typer.colors.GREEN)
 
 
 def project_init(

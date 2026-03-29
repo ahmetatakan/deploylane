@@ -12,6 +12,7 @@ from ..remote import copy_file, RemoteError, ssh_run_interactive, read_remote_fi
 from ..workspace import load_workspace, project_deploy_yml
 from ._utils import _err
 from .workspace._utils import _resolve_ws
+from ..deploystate import read_state, write_state, local_file_hashes, changed_since_state
 
 deploy_app = typer.Typer(no_args_is_help=True, help="Deploy workspace projects.")
 
@@ -74,21 +75,21 @@ def _merged_env_file(base_env: Path, local_env: Path) -> Path:
     return tmp
 
 
-def _fetch_remote_compose(dest: str, remote_dir: str) -> Optional[str]:
-    """Fetch remote docker-compose.yml. Returns None if not present."""
+def _fetch_remote_compose(dest: str, remote_dir: str, compose_file: str = "docker-compose.yml") -> Optional[str]:
+    """Fetch remote compose file. Returns None if not present."""
     try:
-        return read_remote_file(dest, f"{remote_dir}/docker-compose.yml")
+        return read_remote_file(dest, f"{remote_dir}/{compose_file}")
     except RemoteError:
         return None
 
 
-def _compose_diff(remote_content: str, local_content: str) -> List[str]:
+def _compose_diff(remote_content: str, local_content: str, compose_file: str = "docker-compose.yml") -> List[str]:
     import difflib
     return list(difflib.unified_diff(
         remote_content.splitlines(keepends=True),
         local_content.splitlines(keepends=True),
-        fromfile="server:docker-compose.yml",
-        tofile="local:docker-compose.yml",
+        fromfile=f"server:{compose_file}",
+        tofile=f"local:{compose_file}",
     ))
 
 
@@ -129,6 +130,8 @@ def _diff_project(ws_path: Path, name: str, target: str) -> bool:
         _err(f"deploy.yml target '{target}': 'host' is empty.")
 
     strategy = (getattr(t, "strategy", "plain") or "plain").strip()
+    compose_file = t.compose_file
+    deploy_script = t.deploy_script
     dest = f"{t.user}@{t.host}"
     remote_dir = t.deploy_dir
     base = ws_dir / project.path / ".deploylane"
@@ -138,58 +141,58 @@ def _diff_project(ws_path: Path, name: str, target: str) -> bool:
 
     any_diff = False
 
-    # docker-compose.yml
+    # compose file
     compose_src = base / "compose" / f"{strategy}.yml"
     if not compose_src.exists():
         compose_src = base / "compose" / "plain.yml"
 
     if compose_src.exists():
-        remote_compose = _fetch_remote_compose(dest, remote_dir)
+        remote_compose = _fetch_remote_compose(dest, remote_dir, compose_file)
         if remote_compose is None:
-            typer.secho("  docker-compose.yml  — not on server yet (will be created on push)", fg=typer.colors.YELLOW)
+            typer.secho(f"  {compose_file:<20}— not on server yet (will be created on push)", fg=typer.colors.YELLOW)
             any_diff = True
         else:
             local_compose = compose_src.read_text(encoding="utf-8")
             if remote_compose.strip() == local_compose.strip():
-                typer.secho("  docker-compose.yml  ✓ identical", fg=typer.colors.GREEN)
+                typer.secho(f"  {compose_file:<20}✓ identical", fg=typer.colors.GREEN)
             else:
-                typer.secho("  docker-compose.yml  ✗ differs:", fg=typer.colors.RED)
+                typer.secho(f"  {compose_file:<20}✗ differs:", fg=typer.colors.RED)
                 diff = list(difflib.unified_diff(
                     remote_compose.splitlines(keepends=True),
                     local_compose.splitlines(keepends=True),
-                    fromfile="server:docker-compose.yml",
-                    tofile="local:docker-compose.yml",
+                    fromfile=f"server:{compose_file}",
+                    tofile=f"local:{compose_file}",
                 ))
                 _print_diff(diff)
                 any_diff = True
 
-    # deploy.sh
+    # deploy script
     script_src = base / "scripts" / "deploy.sh"
     if script_src.exists():
         try:
-            remote_sh = read_remote_file(dest, f"{remote_dir}/deploy.sh")
+            remote_sh = read_remote_file(dest, f"{remote_dir}/{deploy_script}")
             local_sh = script_src.read_text(encoding="utf-8")
             if remote_sh.strip() == local_sh.strip():
-                typer.secho("  deploy.sh           ✓ identical", fg=typer.colors.GREEN)
+                typer.secho(f"  {deploy_script:<20}✓ identical", fg=typer.colors.GREEN)
             else:
-                typer.secho("  deploy.sh           ✗ differs:", fg=typer.colors.RED)
+                typer.secho(f"  {deploy_script:<20}✗ differs:", fg=typer.colors.RED)
                 diff = list(difflib.unified_diff(
                     remote_sh.splitlines(keepends=True),
                     local_sh.splitlines(keepends=True),
-                    fromfile="server:deploy.sh",
-                    tofile="local:deploy.sh",
+                    fromfile=f"server:{deploy_script}",
+                    tofile=f"local:{deploy_script}",
                 ))
                 _print_diff(diff)
                 any_diff = True
         except RemoteError:
-            typer.secho("  deploy.sh           — not on server yet (will be created on push)", fg=typer.colors.YELLOW)
+            typer.secho(f"  {deploy_script:<20}— not on server yet (will be created on push)", fg=typer.colors.YELLOW)
             any_diff = True
 
     # .env
     if remote_file_exists(dest, f"{remote_dir}/.env"):
-        typer.secho("  .env                ✓ exists on server (never overwritten by push)", fg=typer.colors.GREEN)
+        typer.secho(f"  {'env':<20}✓ exists on server (never overwritten by push)", fg=typer.colors.GREEN)
     else:
-        typer.secho("  .env                — not on server yet (will be created on first push)", fg=typer.colors.YELLOW)
+        typer.secho(f"  {'env':<20}— not on server yet (will be created on first push)", fg=typer.colors.YELLOW)
         any_diff = True
 
     return any_diff
@@ -244,11 +247,34 @@ def _push_project(
             ), changes
 
         strategy = (getattr(t, "strategy", "plain") or "plain").strip()
+        compose_file = t.compose_file
+        deploy_script = t.deploy_script
         dest = f"{t.user}@{t.host}"
         remote_dir = t.deploy_dir
         base = ws_dir / project.path / ".deploylane"
 
         typer.echo(f"  {'(dry run) ' if not yes else ''}{dest}:{remote_dir}")
+
+        # ── Pull-before-push state check ──────────────────────────────────────
+        if yes and not force:
+            _probe = _fetch_remote_compose(dest, remote_dir, compose_file)
+            if _probe is not None:  # server has files → require pull state
+                state = read_state(base, target)
+                if state is None:
+                    return False, (
+                        f"No pull record for target '{target}'.\n"
+                        f"  Server has existing files — pull first:\n"
+                        f"  → dlane deploy pull {name}\n"
+                        f"  To bypass: dlane deploy push {name} --force"
+                    ), changes
+
+                current_hashes = local_file_hashes(base, strategy, compose_file, deploy_script)
+                changed = changed_since_state(state, current_hashes)
+                if changed:
+                    typer.secho("  ⚠  Changed since last pull:", fg=typer.colors.YELLOW)
+                    for f in changed:
+                        typer.secho(f"     - {f}", fg=typer.colors.YELLOW)
+                    typer.echo("")
 
         # .env
         env_src = base / "env" / f"{target}.env"
@@ -276,22 +302,22 @@ def _push_project(
                 if tmp_env and tmp_env.exists():
                     tmp_env.unlink()
 
-        # deploy.sh
+        # deploy script
         script_src = base / "scripts" / "deploy.sh"
         if script_src.exists():
             if not force:
                 try:
-                    remote_sh = read_remote_file(dest, f"{remote_dir}/deploy.sh")
+                    remote_sh = read_remote_file(dest, f"{remote_dir}/{deploy_script}")
                     local_sh = script_src.read_text(encoding="utf-8")
                     if remote_sh.strip() != local_sh.strip():
                         import difflib
                         diff = list(difflib.unified_diff(
                             remote_sh.splitlines(keepends=True),
                             local_sh.splitlines(keepends=True),
-                            fromfile="server:deploy.sh",
-                            tofile="local:deploy.sh",
+                            fromfile=f"server:{deploy_script}",
+                            tofile=f"local:{deploy_script}",
                         ))
-                        typer.secho("  ⚠ Server deploy.sh differs from local:", fg=typer.colors.YELLOW)
+                        typer.secho(f"  ⚠ Server {deploy_script} differs from local:", fg=typer.colors.YELLOW)
                         for line in diff:
                             if line.startswith("+"):
                                 typer.secho(line, fg=typer.colors.GREEN, nl=False)
@@ -299,30 +325,30 @@ def _push_project(
                                 typer.secho(line, fg=typer.colors.RED, nl=False)
                             else:
                                 typer.echo(line, nl=False)
-                        return False, "Server deploy.sh has changes. Run 'dlane deploy pull' first, or use --force to override.", changes
+                        return False, f"Server {deploy_script} has changes. Run 'dlane deploy pull' first, or use --force to override.", changes
                     changes["deploy_sh"] = "unchanged"
                 except RemoteError:
                     pass  # not on server yet, first push
             try:
-                copy_file(script_src, dest, f"{remote_dir}/deploy.sh", dry_run=(not yes))
-                typer.echo(f"  deploy.sh → {remote_dir}/deploy.sh")
+                copy_file(script_src, dest, f"{remote_dir}/{deploy_script}", dry_run=(not yes))
+                typer.echo(f"  deploy.sh → {remote_dir}/{deploy_script}")
                 changes["deploy_sh"] = changes.get("deploy_sh") or "pushed"
             except Exception as e:
-                typer.secho(f"  Warning: could not push deploy.sh: {e}", fg=typer.colors.YELLOW)
+                typer.secho(f"  Warning: could not push {deploy_script}: {e}", fg=typer.colors.YELLOW)
                 changes["deploy_sh"] = "failed"
 
-        # docker-compose.yml
+        # compose file
         compose_src = base / "compose" / f"{strategy}.yml"
         if not compose_src.exists():
             compose_src = base / "compose" / "plain.yml"
         if compose_src.exists():
             if not force:
-                remote_compose = _fetch_remote_compose(dest, remote_dir)
+                remote_compose = _fetch_remote_compose(dest, remote_dir, compose_file)
                 if remote_compose is not None:
                     local_compose = compose_src.read_text(encoding="utf-8")
                     if remote_compose.strip() != local_compose.strip():
-                        diff = _compose_diff(remote_compose, local_compose)
-                        typer.secho("  ⚠ Server compose differs from local:", fg=typer.colors.YELLOW)
+                        diff = _compose_diff(remote_compose, local_compose, compose_file)
+                        typer.secho(f"  ⚠ Server {compose_file} differs from local:", fg=typer.colors.YELLOW)
                         for line in diff:
                             if line.startswith("+"):
                                 typer.secho(line, fg=typer.colors.GREEN, nl=False)
@@ -330,20 +356,25 @@ def _push_project(
                                 typer.secho(line, fg=typer.colors.RED, nl=False)
                             else:
                                 typer.echo(line, nl=False)
-                        return False, "Server has uncommitted changes. Run 'dlane deploy pull' first, or use --force to override.", changes
+                        return False, f"Server has uncommitted changes. Run 'dlane deploy pull' first, or use --force to override.", changes
                     changes["compose"] = "unchanged"
                 else:
                     changes["compose"] = "pushed"
             try:
-                copy_file(compose_src, dest, f"{remote_dir}/docker-compose.yml", dry_run=(not yes))
-                typer.echo(f"  .deploylane/compose/{strategy}.yml → {remote_dir}/docker-compose.yml")
+                copy_file(compose_src, dest, f"{remote_dir}/{compose_file}", dry_run=(not yes))
+                typer.echo(f"  .deploylane/compose/{strategy}.yml → {remote_dir}/{compose_file}")
                 changes["compose"] = changes.get("compose") or "pushed"
             except Exception as e:
-                typer.secho(f"  Warning: could not push docker-compose.yml: {e}", fg=typer.colors.YELLOW)
+                typer.secho(f"  Warning: could not push {compose_file}: {e}", fg=typer.colors.YELLOW)
                 changes["compose"] = "failed"
 
     except Exception as e:
         return False, str(e), changes
+
+    # Update state to reflect what's now on server
+    if yes:
+        current_hashes = local_file_hashes(base, strategy, compose_file, deploy_script)
+        write_state(base, target, t.host, current_hashes)
 
     return True, "", changes
 
@@ -352,25 +383,28 @@ def _push_project(
 
 
 
-def _pull_file(dest: str, remote_path: str, local_path: Path, label: str) -> None:
-    """Pull a single file from server. Shows diff and asks confirmation if different."""
+def _pull_file(dest: str, remote_path: str, local_path: Path, label: str, yes: bool = False) -> bool:
+    """Pull a single file from server. Shows diff and asks confirmation if different.
+
+    Returns True if the file was written (created or updated), False otherwise.
+    """
     import difflib
     try:
         remote_content = read_remote_file(dest, remote_path)
     except RemoteError:
         typer.secho(f"    {label}: not found on server — skipped", fg=typer.colors.YELLOW)
-        return
+        return False
 
     if not local_path.exists():
         local_path.parent.mkdir(parents=True, exist_ok=True)
         local_path.write_text(remote_content, encoding="utf-8")
         typer.secho(f"    {label}: created", fg=typer.colors.GREEN)
-        return
+        return True
 
     local_content = local_path.read_text(encoding="utf-8")
     if remote_content.strip() == local_content.strip():
         typer.secho(f"    {label}: up to date", fg=typer.colors.GREEN)
-        return
+        return False
 
     diff = list(difflib.unified_diff(
         remote_content.splitlines(keepends=True),
@@ -387,9 +421,14 @@ def _pull_file(dest: str, remote_path: str, local_path: Path, label: str) -> Non
         else:
             typer.echo(line, nl=False)
     typer.echo("")
-    typer.confirm(f"    Overwrite local {label}?", abort=True)
+
+    if not yes and not typer.confirm(f"    Overwrite local {label}?", default=True):
+        typer.secho(f"    {label}: skipped", fg=typer.colors.YELLOW)
+        return False
+
     local_path.write_text(remote_content, encoding="utf-8")
     typer.secho(f"    {label}: updated", fg=typer.colors.GREEN)
+    return True
 
 
 def _pull_target(
@@ -399,12 +438,19 @@ def _pull_target(
     strategy_top: str,
     base: Path,
     app_name: str,
+    yes: bool = False,
 ) -> None:
-    """Pull compose, .env and nginx configs from a single target's server."""
+    """Pull compose and .env from a single target's server.
+
+    deploy.sh is intentionally NOT pulled — it is always managed by 'dlane sync'
+    from the package template and should never be overwritten by a server copy.
+    """
     host = str(t_raw.get("host") or "").strip()
     user = str(t_raw.get("user") or "deploy").strip()
     remote_dir = str(t_raw.get("deploy_dir") or "").strip()
     strategy = str(t_raw.get("strategy") or strategy_top).strip()
+    compose_file = str(t_raw.get("compose_file") or "docker-compose.yml").strip() or "docker-compose.yml"
+    deploy_script = str(t_raw.get("deploy_script") or "deploy.sh").strip() or "deploy.sh"
 
     if not host or not remote_dir:
         typer.secho(f"  [{t_name}] Skipped — missing host or deploy_dir", fg=typer.colors.YELLOW)
@@ -413,18 +459,15 @@ def _pull_target(
     dest = f"{user}@{host}"
     typer.secho(f"  [{t_name}] Pulling from {dest}:{remote_dir}", fg=typer.colors.CYAN)
 
-    # compose
+    # compose (user-editable, pull from server)
     compose_local = base / "compose" / f"{strategy}.yml"
     if not compose_local.exists():
         compose_local = base / "compose" / "plain.yml"
-    _pull_file(dest, f"{remote_dir}/docker-compose.yml", compose_local, "docker-compose.yml")
+    _pull_file(dest, f"{remote_dir}/{compose_file}", compose_local, compose_file, yes=yes)
 
-    # deploy.sh
-    _pull_file(dest, f"{remote_dir}/deploy.sh", base / "scripts" / "deploy.sh", "deploy.sh")
-
-    # .env
+    # .env (server state: running tag, ports, etc.)
     env_local = base / "env" / f"{t_name}.env"
-    _pull_file(dest, f"{remote_dir}/.env", env_local, f"{t_name}.env")
+    _pull_file(dest, f"{remote_dir}/.env", env_local, f"{t_name}.env", yes=yes)
 
     # nginx + sudoers (bluegreen only) — files live in system dirs after install
     if strategy == "bluegreen":
@@ -442,6 +485,11 @@ def _pull_target(
             )
 
         # sudoers requires root to read — cannot pull via SSH as deploy user
+
+    # Write pull state so push can verify local is based on known server state
+    hashes = local_file_hashes(base, strategy, compose_file, deploy_script)
+    write_state(base, t_name, host, hashes)
+    typer.secho(f"  [{t_name}] ✓  State saved", fg=typer.colors.CYAN)
 
 
 @deploy_app.command("diff")
@@ -477,9 +525,13 @@ def deploy_pull(
     ctx: typer.Context,
     name: Optional[str] = typer.Argument(None, help="Project alias"),
     target: Optional[str] = typer.Option(None, "--target", help="Pull specific target only"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Overwrite changed files without prompting"),
     file: Optional[Path] = typer.Option(None, "--file", help="workspace.yml path"),
 ) -> None:
-    """Fetch docker-compose.yml from all target servers and update local copies."""
+    """Fetch compose + .env from target servers and update local copies.
+
+    deploy.sh is not pulled — it is always managed by 'dlane sync'.
+    """
     if not name:
         typer.echo(ctx.get_help())
         raise typer.Exit(0)
@@ -490,7 +542,7 @@ def deploy_pull(
 
     deploy_yml = project_deploy_yml(project, ws_dir)
     if not deploy_yml.exists():
-        _err(f"deploy.yml not found. Run: dlane scaffold {name}")
+        _err(f"deploy.yml not found. Run: dlane sync {name}")
 
     import yaml as _yaml
     raw = _yaml.safe_load(deploy_yml.read_text(encoding="utf-8")) or {}
@@ -505,11 +557,11 @@ def deploy_pull(
         t_raw = targets_raw.get(target)
         if not t_raw:
             _err(f"Target '{target}' not found in deploy.yml.")
-        _pull_target(name, target, t_raw, strategy_top, base, app_name)
+        _pull_target(name, target, t_raw, strategy_top, base, app_name, yes=yes)
     else:
         for t_name, t_raw in targets_raw.items():
             if isinstance(t_raw, dict):
-                _pull_target(name, t_name, t_raw, strategy_top, base, app_name)
+                _pull_target(name, t_name, t_raw, strategy_top, base, app_name, yes=yes)
 
     typer.secho(f"[{name}] Pull done.", fg=typer.colors.GREEN)
 
@@ -701,10 +753,19 @@ def _parse_remote_env(dest: str, remote_dir: str) -> Dict[str, str]:
 
 
 def _compose_service_running(dest: str, remote_dir: str, service_name: str) -> bool:
-    """Check if a docker compose service is running."""
+    """Check if a docker compose service is running.
+
+    Uses the same -p / --project-directory flags as deploy.sh so Docker Compose
+    resolves the correct project regardless of working directory.
+    """
     try:
-        out = ssh_capture(dest, f"cd {remote_dir} && docker compose ps --status running --services 2>/dev/null")
-        return service_name in out.splitlines()
+        project = remote_dir.rstrip("/").rsplit("/", 1)[-1]
+        out = ssh_capture(
+            dest,
+            f"docker compose --project-directory {remote_dir} -p {project} ps {service_name} 2>/dev/null",
+        )
+        lower = out.lower()
+        return "up" in lower or "running" in lower
     except RemoteError:
         return False
 

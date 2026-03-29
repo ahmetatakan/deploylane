@@ -21,6 +21,10 @@ class DeployTarget:
     health_host: str = ""
     env_scope: str = "*"
 
+    # server-side file names (configurable, defaults match Docker/deploylane convention)
+    compose_file: str = "docker-compose.yml"
+    deploy_script: str = "deploy.sh"
+
     # legacy / overrides
     service_blue: str = ""
     service_green: str = ""
@@ -115,6 +119,9 @@ def load_deployspec(path: Path) -> DeploySpec:
             port_green = tr.get("port_green", 0)
             port_plain = tr.get("port_plain", tr.get("port_blue", 0))
 
+        compose_file = str(tr.get("compose_file") or "docker-compose.yml").strip() or "docker-compose.yml"
+        deploy_script = str(tr.get("deploy_script") or "deploy.sh").strip() or "deploy.sh"
+
         targets[name] = DeployTarget(
             name=name,
             host=host.strip(),
@@ -123,6 +130,8 @@ def load_deployspec(path: Path) -> DeploySpec:
             app_name=str(app_name).strip(),
             registry_host=registry_host,
             strategy=str(strategy).strip(),
+            compose_file=compose_file,
+            deploy_script=deploy_script,
             service_blue=str(service_blue or "").strip(),
             service_green=str(service_green or "").strip(),
             port_blue=_to_int(port_blue),
