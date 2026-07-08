@@ -178,7 +178,7 @@ def remote_file_exists(dest: str, remote_path: str) -> bool:
     """Check if a remote file exists via SSH."""
     require_tools("ssh")
     result = subprocess.run(
-        ["ssh", dest, f"test -f {remote_path}"],
+        ["ssh", dest, f"test -f '{remote_path}'"],
         capture_output=True,
     )
     return result.returncode == 0
@@ -188,7 +188,7 @@ def read_remote_file(dest: str, remote_path: str) -> str:
     """Read a remote file via SSH. Raises RemoteError if not found or unreadable."""
     require_tools("ssh")
     result = subprocess.run(
-        ["ssh", dest, f"cat {remote_path}"],
+        ["ssh", dest, f"cat '{remote_path}'"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:

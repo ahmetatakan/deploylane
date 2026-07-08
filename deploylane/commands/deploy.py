@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -67,12 +68,14 @@ def _merged_env_file(base_env: Path, local_env: Path) -> Path:
     merged = _parse_env(base_env)
     if local_env.exists():
         merged.update(_parse_env(local_env))
-    tmp = Path(tempfile.mktemp(suffix=".env"))
-    tmp.write_text(
-        "\n".join(f"{k}={v}" for k, v in sorted(merged.items())) + "\n",
-        encoding="utf-8",
-    )
-    return tmp
+    fd, tmp_name = tempfile.mkstemp(suffix=".env")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(f"{k}={v}" for k, v in sorted(merged.items())) + "\n")
+    except Exception:
+        os.unlink(tmp_name)
+        raise
+    return Path(tmp_name)
 
 
 def _fetch_remote_compose(dest: str, remote_dir: str, compose_file: str = "docker-compose.yml") -> Optional[str]:
@@ -374,7 +377,13 @@ def _push_project(
     # Update state to reflect what's now on server
     if yes:
         current_hashes = local_file_hashes(base, strategy, compose_file, deploy_script)
-        write_state(base, target, t.host, current_hashes)
+        write_state(
+            base, target, t.host, current_hashes,
+            strategy=strategy,
+            compose_file=compose_file,
+            deploy_script=deploy_script,
+            direction="push",
+        )
 
     return True, "", changes
 
@@ -406,13 +415,14 @@ def _pull_file(dest: str, remote_path: str, local_path: Path, label: str, yes: b
         typer.secho(f"    {label}: up to date", fg=typer.colors.GREEN)
         return False
 
+    # unified_diff(local, remote): - = removed from local, + = added to local
     diff = list(difflib.unified_diff(
-        remote_content.splitlines(keepends=True),
         local_content.splitlines(keepends=True),
-        fromfile=f"server:{label}",
-        tofile=f"local:{label}",
+        remote_content.splitlines(keepends=True),
+        fromfile=f"local:{label}",
+        tofile=f"server:{label}",
     ))
-    typer.secho(f"    {label}: diff (server → local):", fg=typer.colors.YELLOW)
+    typer.secho(f"    {label}: changes that would be applied to local:", fg=typer.colors.YELLOW)
     for line in diff:
         if line.startswith("+"):
             typer.secho(line, fg=typer.colors.GREEN, nl=False)
@@ -422,13 +432,83 @@ def _pull_file(dest: str, remote_path: str, local_path: Path, label: str, yes: b
             typer.echo(line, nl=False)
     typer.echo("")
 
-    if not yes and not typer.confirm(f"    Overwrite local {label}?", default=True):
+    if not yes and not typer.confirm(f"    Overwrite local {label} with server version?", default=True):
         typer.secho(f"    {label}: skipped", fg=typer.colors.YELLOW)
         return False
 
     local_path.write_text(remote_content, encoding="utf-8")
     typer.secho(f"    {label}: updated", fg=typer.colors.GREEN)
     return True
+
+
+_COMPOSE_PULL_CANDIDATES = [
+    "docker-compose.bluegreen.yml",
+    "docker-compose.bluegreen.yaml",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "docker-compose.prod.yml",
+    "compose.yml",
+    "compose.yaml",
+    "docker-compose.plain.yml",
+    "docker-compose.plain.yaml",
+]
+
+
+def _ssh_run_capture(dest: str, cmd: str, timeout: int = 10) -> str:
+    """Run SSH command, return stdout. Returns empty string on any error."""
+    import subprocess as _sp
+    r = _sp.run(
+        ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", dest, cmd],
+        capture_output=True, text=True, timeout=timeout,
+    )
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _discover_remote_compose(
+    dest: str,
+    remote_dir: str,
+    configured: str,
+    server_strategy: str = "",
+) -> Optional[str]:
+    """Return the compose filename that is actually in use on the server.
+
+    Discovery order:
+    1. docker compose ls — finds the live compose config file for the project
+    2. File existence probing — bluegreen-specific names first when strategy=bluegreen
+       and the configured name looks like a plain file (has 'plain' in its name)
+    """
+    import subprocess as _sp
+    import json as _json
+    import os as _os
+
+    project_name = remote_dir.rstrip("/").rsplit("/", 1)[-1]
+    ls_out = _ssh_run_capture(dest, "docker compose ls --format json 2>/dev/null || true", timeout=15)
+    if ls_out:
+        try:
+            for proj in _json.loads(ls_out):
+                if proj.get("Name") == project_name:
+                    for cf in str(proj.get("ConfigFiles") or "").split(","):
+                        cf = cf.strip()
+                        if cf.startswith(remote_dir):
+                            return _os.path.basename(cf)
+        except Exception:
+            pass
+
+    skip_configured = server_strategy == "bluegreen" and "plain" in configured.lower()
+    if skip_configured:
+        candidates = [c for c in _COMPOSE_PULL_CANDIDATES if c != configured] + [configured]
+    else:
+        candidates = [configured] + [c for c in _COMPOSE_PULL_CANDIDATES if c != configured]
+
+    for candidate in candidates:
+        r = _sp.run(
+            ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+             dest, f"test -f '{remote_dir}/{candidate}' && echo yes || echo no"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0 and r.stdout.strip() == "yes":
+            return candidate
+    return None
 
 
 def _pull_target(
@@ -439,11 +519,13 @@ def _pull_target(
     base: Path,
     app_name: str,
     yes: bool = False,
-) -> None:
+) -> Optional[Tuple[str, str]]:
     """Pull compose and .env from a single target's server.
 
-    deploy.sh is intentionally NOT pulled — it is always managed by 'dlane sync'
-    from the package template and should never be overwritten by a server copy.
+    Returns (actual_strategy, actual_compose_file) so callers can reconcile
+    deploy.yml when the server state differs from local config.
+
+    deploy.sh is intentionally NOT pulled — it is managed by 'dlane sync'.
     """
     host = str(t_raw.get("host") or "").strip()
     user = str(t_raw.get("user") or "deploy").strip()
@@ -454,20 +536,43 @@ def _pull_target(
 
     if not host or not remote_dir:
         typer.secho(f"  [{t_name}] Skipped — missing host or deploy_dir", fg=typer.colors.YELLOW)
-        return
+        return None
 
     dest = f"{user}@{host}"
     typer.secho(f"  [{t_name}] Pulling from {dest}:{remote_dir}", fg=typer.colors.CYAN)
 
-    # compose (user-editable, pull from server)
-    compose_local = base / "compose" / f"{strategy}.yml"
-    if not compose_local.exists():
-        compose_local = base / "compose" / "plain.yml"
-    _pull_file(dest, f"{remote_dir}/{compose_file}", compose_local, compose_file, yes=yes)
-
-    # .env (server state: running tag, ports, etc.)
+    # Pull .env first so we can read DEPLOY_STRATEGY before pulling compose
     env_local = base / "env" / f"{t_name}.env"
     _pull_file(dest, f"{remote_dir}/.env", env_local, f"{t_name}.env", yes=yes)
+
+    # Read DEPLOY_STRATEGY from pulled .env
+    server_strategy = strategy
+    if env_local.exists():
+        for line in env_local.read_text(encoding="utf-8").splitlines():
+            if line.startswith("DEPLOY_STRATEGY="):
+                val = line.partition("=")[2].strip()
+                if val:
+                    server_strategy = val
+                break
+
+    if server_strategy != strategy:
+        typer.secho(
+            f"  [{t_name}] ⚠  server DEPLOY_STRATEGY={server_strategy} "
+            f"(deploy.yml says {strategy}) — using server value",
+            fg=typer.colors.YELLOW,
+        )
+        strategy = server_strategy
+
+    # Discover actual compose file on server using server strategy for smart ordering
+    actual_compose = _discover_remote_compose(dest, remote_dir, compose_file, server_strategy=strategy)
+    if actual_compose is None:
+        typer.secho(f"  [{t_name}] ⚠  compose file not found on server — skipping", fg=typer.colors.YELLOW)
+        actual_compose = compose_file
+    elif actual_compose != compose_file:
+        typer.secho(f"  [{t_name}] ⚠  found '{actual_compose}' on server (deploy.yml says '{compose_file}')", fg=typer.colors.YELLOW)
+
+    compose_local = base / "compose" / f"{strategy}.yml"
+    _pull_file(dest, f"{remote_dir}/{actual_compose}", compose_local, actual_compose, yes=yes)
 
     # nginx + sudoers (bluegreen only) — files live in system dirs after install
     if strategy == "bluegreen":
@@ -477,19 +582,34 @@ def _pull_target(
             (f"00-{app_name}-upstream.conf",    "/etc/nginx/sites-available"),
         ]
         for fname, nginx_dir in nginx_pulls:
-            _pull_file(
-                dest,
-                f"{nginx_dir}/{fname}",
-                base / "nginx" / fname,
-                f"nginx/{fname}",
-            )
+            _pull_file(dest, f"{nginx_dir}/{fname}", base / "nginx" / fname, f"nginx/{fname}")
 
         # sudoers requires root to read — cannot pull via SSH as deploy user
 
-    # Write pull state so push can verify local is based on known server state
-    hashes = local_file_hashes(base, strategy, compose_file, deploy_script)
-    write_state(base, t_name, host, hashes)
+    # Capture relevant server env keys (no secrets — DB creds excluded)
+    _ENV_STATE_KEYS = {"DEPLOY_STRATEGY", "ACTIVE_COLOR", "APP_NAME", "PLAIN_PORT", "APP_PORT_BLUE", "APP_PORT_GREEN"}
+    server_env: Dict[str, str] = {}
+    tag_prefix = app_name.upper().replace("-", "_") + "_TAG"
+    if env_local.exists():
+        for line in env_local.read_text(encoding="utf-8").splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                k = k.strip()
+                if k in _ENV_STATE_KEYS or k.startswith(tag_prefix):
+                    server_env[k] = v.strip()
+
+    hashes = local_file_hashes(base, strategy, actual_compose, deploy_script)
+    write_state(
+        base, t_name, host, hashes,
+        strategy=strategy,
+        compose_file=actual_compose,
+        deploy_script=deploy_script,
+        server_env=server_env or None,
+        direction="pull",
+    )
     typer.secho(f"  [{t_name}] ✓  State saved", fg=typer.colors.CYAN)
+
+    return strategy, actual_compose
 
 
 @deploy_app.command("diff")
@@ -566,6 +686,41 @@ def deploy_pull(
     typer.secho(f"[{name}] Pull done.", fg=typer.colors.GREEN)
 
 
+def _push_confirm(project_name: str, resolved_target: str, ws_path: Path, ci: bool) -> bool:
+    """Show push summary and ask for confirmation. Returns True if confirmed."""
+    import yaml as _yaml
+    from ..workspace import load_workspace as _lws, project_deploy_yml as _pdyl
+
+    ws = _lws(ws_path)
+    proj = next((p for p in ws.projects if p.name == project_name), None)
+    host = "unknown"
+    if proj:
+        deploy_yml = _pdyl(proj, ws_path.parent)
+        if deploy_yml.exists():
+            raw = _yaml.safe_load(deploy_yml.read_text(encoding="utf-8")) or {}
+            t_data = (raw.get("targets") or {}).get(resolved_target) or {}
+            host = str(t_data.get("host") or "unknown")
+
+    is_prod = resolved_target in ("prod", "production")
+
+    typer.echo("")
+    typer.secho("  ┌─ PUSH CONFIRMATION " + "─" * 35, fg=typer.colors.YELLOW, bold=True)
+    typer.secho(f"  │  project : {project_name}", fg=typer.colors.YELLOW)
+    typer.secho(f"  │  target  : {resolved_target}", fg=typer.colors.YELLOW)
+    typer.secho(f"  │  host    : {host}", fg=typer.colors.YELLOW)
+    if is_prod:
+        typer.secho("  │", fg=typer.colors.RED)
+        typer.secho("  │  ⚠  PRODUCTION TARGET — files will be overwritten on server", fg=typer.colors.RED, bold=True)
+    typer.secho("  └" + "─" * 55, fg=typer.colors.YELLOW, bold=True)
+    typer.echo("")
+
+    if ci:
+        typer.secho("  --ci flag set, skipping confirmation", fg=typer.colors.BRIGHT_BLACK)
+        return True
+
+    return typer.confirm("  Proceed with push?", default=False)
+
+
 @deploy_app.command("push")
 def deploy_push(
     ctx: typer.Context,
@@ -573,6 +728,7 @@ def deploy_push(
     target: Optional[str] = typer.Option(None, "--target", help="Deploy target name"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Actually push (default: dry run)"),
     force: bool = typer.Option(False, "--force", help="Skip server compose check and push anyway"),
+    ci: bool = typer.Option(False, "--ci", help="Non-interactive mode: skip confirmation prompt (for pipelines)"),
     all_projects: bool = typer.Option(False, "--all", help="Push all projects in workspace"),
     tag: Optional[str] = typer.Option(None, "--tag", help="Push all projects with this workspace tag"),
     file: Optional[Path] = typer.Option(None, "--file", help="workspace.yml path"),
@@ -616,6 +772,9 @@ def deploy_push(
     if len(names) == 1:
         resolved_target = _resolve_target(names[0], target, ws_path)
         typer.secho(f"[{names[0]}] Push {'(dry run)' if not yes else ''} → target={resolved_target}", fg=typer.colors.CYAN)
+        if yes and not _push_confirm(names[0], resolved_target, ws_path, ci=ci):
+            typer.secho("  Aborted.", fg=typer.colors.YELLOW)
+            raise typer.Exit(0)
         ok, err, changes = _push_project(ws_path, names[0], resolved_target, yes, force=force)
         _log_push(names[0], resolved_target, ok, err, changes)
         if ok:
@@ -632,6 +791,11 @@ def deploy_push(
     for project_name in names:
         resolved_target = _resolve_target(project_name, target, ws_path)
         typer.secho(f"── {project_name}  target={resolved_target} ──────────────────────────", bold=True)
+        if yes and not _push_confirm(project_name, resolved_target, ws_path, ci=ci):
+            typer.secho(f"  [{project_name}] Skipped.", fg=typer.colors.YELLOW)
+            results.append((project_name, True, ""))
+            typer.echo("")
+            continue
         ok, err, changes = _push_project(ws_path, project_name, resolved_target, yes, force=force)
         _log_push(project_name, resolved_target, ok, err, changes)
         results.append((project_name, ok, err))

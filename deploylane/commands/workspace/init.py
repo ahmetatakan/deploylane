@@ -608,26 +608,41 @@ def _scaffold_infra(name: str, project_path: Path, ws_path: Path) -> None:
             fg=typer.colors.GREEN,
         )
 
-    # ── nginx + sudoers (bluegreen only, based on default target strategy) ────
+    # ── nginx + sudoers (bluegreen only) — create once, never overwrite
+    # These files are server-managed after first deploy; restore pulls them from server.
     if strategy == "bluegreen":
         nginx_dir = base / "nginx"
         nginx_dir.mkdir(parents=True, exist_ok=True)
 
-        (nginx_dir / f"{app_name}-upstream-blue.conf").write_text(render_nginx_blue(ctx), encoding="utf-8")
-        (nginx_dir / f"{app_name}-upstream-green.conf").write_text(render_nginx_green(ctx), encoding="utf-8")
-        (nginx_dir / f"00-{app_name}-upstream.conf").write_text(render_nginx_site_include(ctx), encoding="utf-8")
-        typer.secho(f"  Created .deploylane/nginx/ (3 files)", fg=typer.colors.GREEN)
+        nginx_files = {
+            nginx_dir / f"{app_name}-upstream-blue.conf":  render_nginx_blue(ctx),
+            nginx_dir / f"{app_name}-upstream-green.conf": render_nginx_green(ctx),
+            nginx_dir / f"00-{app_name}-upstream.conf":    render_nginx_site_include(ctx),
+        }
+        nginx_created = [p.name for p, content in nginx_files.items() if not p.exists() and (p.write_text(content, encoding="utf-8") or True)]
+        nginx_skipped = [p.name for p in nginx_files if p.exists()]
+        if nginx_created:
+            typer.secho(f"  Created .deploylane/nginx/ ({', '.join(nginx_created)})", fg=typer.colors.GREEN)
+        if nginx_skipped:
+            typer.secho(f"  .deploylane/nginx/ ({', '.join(nginx_skipped)}) — already exists, not touched", fg=typer.colors.GREEN)
 
         sudoers_dir = base / "sudoers"
         sudoers_dir.mkdir(parents=True, exist_ok=True)
-        (sudoers_dir / "nginx-bg-switch").write_text(render_sudoers(ctx), encoding="utf-8")
-        typer.secho(f"  Created .deploylane/sudoers/nginx-bg-switch", fg=typer.colors.GREEN)
+        sudoers_file = sudoers_dir / "nginx-bg-switch"
+        if not sudoers_file.exists():
+            sudoers_file.write_text(render_sudoers(ctx), encoding="utf-8")
+            typer.secho(f"  Created .deploylane/sudoers/nginx-bg-switch", fg=typer.colors.GREEN)
+        else:
+            typer.secho(f"  .deploylane/sudoers/nginx-bg-switch — already exists, not touched", fg=typer.colors.GREEN)
 
-    # ── install.sh ────────────────────────────────────────────────────────────
+    # ── install.sh — create once; never overwrite (may be customized after install)
     install_dst = base / "install.sh"
-    install_dst.write_text(render_install_sh(ctx), encoding="utf-8")
-    install_dst.chmod(0o755)
-    typer.secho(f"  Created .deploylane/install.sh", fg=typer.colors.GREEN)
+    if not install_dst.exists():
+        install_dst.write_text(render_install_sh(ctx), encoding="utf-8")
+        install_dst.chmod(0o755)
+        typer.secho(f"  Created .deploylane/install.sh", fg=typer.colors.GREEN)
+    else:
+        typer.secho(f"  .deploylane/install.sh — already exists, not touched", fg=typer.colors.GREEN)
 
     # ── vars.yml — standard placeholders (create once, never overwrite) ────────
     vars_yml = base / "vars.yml"

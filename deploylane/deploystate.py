@@ -37,18 +37,38 @@ def write_state(
     target: str,
     host: str,
     file_hashes: Dict[str, Optional[str]],
+    *,
+    strategy: str = "",
+    compose_file: str = "",
+    deploy_script: str = "",
+    server_env: Optional[Dict[str, str]] = None,
+    direction: str = "push",
 ) -> None:
-    """Write state after a pull or push."""
+    """Write state after a pull or push.
+
+    Optional fields:
+      strategy      — actual deploy strategy (plain/bluegreen)
+      compose_file  — server-side compose filename
+      deploy_script — server-side deploy script filename
+      server_env    — relevant keys read from server .env (ACTIVE_COLOR, tags, etc.)
+      direction     — "push" or "pull"
+    """
     state_dir = base / _STATE_DIR
     state_dir.mkdir(parents=True, exist_ok=True)
     _ensure_gitignore(base)
 
-    data = {
+    data: dict = {
         "synced_at": datetime.now(timezone.utc).isoformat(),
+        "direction": direction,
         "target": target,
         "host": host,
+        "strategy": strategy,
+        "compose_file": compose_file,
+        "deploy_script": deploy_script,
         "files": file_hashes,
     }
+    if server_env:
+        data["server_env"] = server_env
     state_path(base, target).write_text(
         json.dumps(data, indent=2), encoding="utf-8"
     )
